@@ -1,0 +1,323 @@
+---
+title: "Crossplane vs Terraform: The Honest Truth About Infrastructure Control Planes"
+date: "2026-02-27"
+description: "Terraform provisions infrastructure and walks away. Crossplane watches it forever. This post runs both side-by-side on k3d — zero cloud credentials required — and gives you a real decision framework for platform teams."
+season: 1
+episode: 3
+tags: ["crossplane", "terraform", "kubernetes", "cncf", "platform-engineering", "gitops", "infrastructure", "control-plane", "iac"]
+---
+
+# Crossplane vs Terraform: The Honest Truth
+
+Here's the question every platform team eventually faces.
+
+You've been using Terraform for years. It works. But now developers want self-service infrastructure. They want to apply a YAML file and get a database. They don't want to trigger a pipeline, wait for approval, and check a Slack notification. They want the Kubernetes experience for everything.
+
+That's where Crossplane comes in. But "replace Terraform with Crossplane" is not the right framing. They are fundamentally different tools solving different problems. This post runs both on a local k3d cluster — no cloud account needed — and shows you exactly when to use which.
+
+---
+
+## Prerequisites
+
+| Tool | Version | Install |
+|------|---------|---------|
+| `kubectl` | any | `brew install kubectl` |
+| `k3d` | 5+ | `brew install k3d` |
+| `helm` | 3+ | `brew install helm` |
+| `terraform` | 1.6+ | `brew install terraform` |
+| Docker | any | [docker.com](https://www.docker.com) |
+
+The demo uses the **Crossplane NOP provider** (no-op — behaves like a real managed resource without touching cloud APIs) and **Terraform's null provider** (local-exec provisioner). Both run air-gapped with no cloud credentials.
+
+---
+
+## Architecture: Pipeline vs Control Plane
+
+### The Terraform Model — Pipeline
+
+```
+Developer → HCL file → terraform apply → Cloud API → Resource created
+              ↑                                              |
+         Drift happens                              State stored in tfstate
+         (no one knows)                                       |
+              └──────────── terraform plan (later) ───────────┘
+```
+
+Terraform is a **pipeline tool**. You invoke it. It provisions. It stores state. Then it waits until you invoke it again. Drift is invisible until you run `terraform plan` manually. In a busy team, that gap can be hours or days.
+
+**Why this matters:** Terraform's state tracks the configuration parameters you passed in, not the actual real-world state of your resources. If someone changes infrastructure outside Terraform — in the cloud console, via a script, or via another tool — Terraform may not detect it at all, depending on what changed.
+
+### The Crossplane Model — Control Plane
+
+```
+Developer → YAML CR → kubectl apply → Crossplane controller
+                                              ↓
+                                    Cloud API (or NOP)
+                                              ↓
+                                      Resource managed
+                                              ↓
+                              Controller watches continuously
+                                              ↓
+                            Drift detected → reconcile immediately
+```
+
+Crossplane runs a **Kubernetes controller** inside your cluster. It watches Custom Resource objects (your desired state declarations) and continuously reconciles the real world to match them. Drift is not a scheduled event — it's detected and corrected in the same reconciliation loop that runs on every watch event.
+
+**Why this matters:** Crossplane transforms infrastructure into a Kubernetes-native experience. Developers interact with it the same way they interact with Deployments and Services. The platform team controls what's available via Composite Resource Definitions (XRDs).
+
+---
+
+## Step-by-Step: Running Both Side-by-Side
+
+### Step 1 — Create the k3d cluster
+
+```bash
+k3d cluster create crossplane --agents 1 --wait \
+  --k3s-arg "--disable=traefik@server:0"
+kubectl config rename-context k3d-crossplane k3d-crossplane
+```
+
+Verify you can reach the cluster:
+
+```bash
+kubectl cluster-info --context k3d-crossplane
+```
+
+### Step 2 — Install Crossplane via Helm
+
+```bash
+helm repo add crossplane-stable https://charts.crossplane.io/stable
+helm repo update
+
+helm install crossplane crossplane-stable/crossplane \
+  --namespace crossplane-system \
+  --create-namespace \
+  --wait \
+  --kube-context k3d-crossplane
+```
+
+Wait for both deployments to be ready:
+
+```bash
+kubectl rollout status deployment/crossplane -n crossplane-system --context k3d-crossplane
+kubectl rollout status deployment/crossplane-rbac-manager -n crossplane-system --context k3d-crossplane
+```
+
+### Step 3 — Install the NOP provider
+
+The NOP provider (`provider-nop`) is a testing/demo provider that behaves exactly like a real Crossplane provider without making any cloud API calls. It accepts managed resources, marks them Ready+Synced after a configurable delay, and responds to deletion. Perfect for demonstrating the control loop without cloud credentials.
+
+```bash
+kubectl apply --context k3d-crossplane -f - <<'EOF'
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-nop
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-nop:v0.3.0
+  packagePullPolicy: IfNotPresent
+EOF
+```
+
+Wait for it to become healthy (may take 60–90s on first pull):
+
+```bash
+kubectl get provider provider-nop --context k3d-crossplane -w
+# Wait for HEALTHY=True, then Ctrl+C
+```
+
+### Step 4 — Set up the Terraform demo
+
+This workspace simulates provisioning a cloud resource using Terraform's `null_resource` with a `local-exec` provisioner. In practice you'd use `aws_s3_bucket`, `google_storage_bucket`, etc.
+
+```bash
+mkdir -p /tmp/ep03-terraform-demo
+cat > /tmp/ep03-terraform-demo/main.tf <<'TFEOF'
+terraform {
+  required_providers {
+    null = { source = "hashicorp/null", version = "~> 3.0" }
+    local = { source = "hashicorp/local", version = "~> 2.0" }
+  }
+}
+
+variable "environment" { default = "production" }
+variable "team" { default = "platform" }
+
+resource "null_resource" "simulated_bucket" {
+  triggers = { environment = var.environment, team = var.team }
+  provisioner "local-exec" {
+    command = "mkdir -p /tmp/ep03-bucket && echo '{\"environment\": \"${var.environment}\", \"team\": \"${var.team}\", \"created_by\": \"terraform\"}' > /tmp/ep03-bucket/config.json && echo 'Resource provisioned: simulated_bucket'"
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "rm -rf /tmp/ep03-bucket && echo 'Resource destroyed: simulated_bucket'"
+  }
+}
+
+resource "local_file" "state_marker" {
+  content  = "terraform-managed: ${var.environment}"
+  filename = "/tmp/ep03-bucket/terraform.marker"
+}
+TFEOF
+
+cd /tmp/ep03-terraform-demo
+terraform init -input=false
+terraform apply -auto-approve -input=false
+cd -
+```
+
+Resource is now "provisioned" — config.json exists at `/tmp/ep03-bucket/config.json`.
+
+### Step 5 — Demonstrate Terraform's drift blindspot
+
+Simulate external drift — someone changes the resource outside of Terraform:
+
+```bash
+echo '{"environment": "staging", "team": "rogue-engineer", "created_by": "manual"}' \
+  > /tmp/ep03-bucket/config.json
+
+cat /tmp/ep03-bucket/config.json
+```
+
+Now run `terraform plan` to check if it detects the drift:
+
+```bash
+cd /tmp/ep03-terraform-demo && terraform plan -input=false && cd -
+```
+
+**Expected output:** `No changes. Your infrastructure matches the configuration.`
+
+This is the key point: Terraform's state tracks the *trigger variables* (`environment`, `team`), not the file content. The drift to `config.json` is invisible to Terraform. In a real cloud environment, this would manifest as configuration drift that Terraform might partially detect (some providers refresh resource attributes, others don't). The core problem remains: Terraform only runs when you tell it to.
+
+### Step 6 — Apply a Crossplane managed resource
+
+```bash
+kubectl apply --context k3d-crossplane -f - <<'EOF'
+apiVersion: nop.crossplane.io/v1alpha1
+kind: NopResource
+metadata:
+  name: demo-infrastructure
+  annotations:
+    crossplane.io/external-name: "ep03-simulated-bucket"
+spec:
+  forProvider:
+    conditionAfter:
+      - conditionType: Ready
+        conditionStatus: "True"
+        time: 5s
+      - conditionType: Synced
+        conditionStatus: "True"
+        time: 5s
+  writeConnectionSecretToRef:
+    namespace: crossplane-system
+    name: demo-infrastructure-conn
+EOF
+```
+
+Check status — should reach Ready+Synced within 10–15 seconds:
+
+```bash
+kubectl get managed --context k3d-crossplane
+```
+
+```
+NAME                  READY   SYNCED   AGE
+demo-infrastructure   True    True     12s
+```
+
+No pipeline triggered. No backend to configure. The controller saw the resource, ran its reconcile function, and the resource is now managed.
+
+---
+
+## Verification
+
+Run the built-in 11-point check after full setup:
+
+```bash
+./setup.sh --verify
+```
+
+All 11 checks should pass:
+
+```
+✔ k3d cluster 'crossplane' exists
+✔ kubectl context k3d-crossplane accessible
+✔ Crossplane namespace exists
+✔ Crossplane deployment running
+✔ Crossplane pod ready
+✔ provider-nop installed
+✔ provider-nop healthy
+✔ Managed resource demo-infrastructure exists
+✔ Terraform state file exists
+✔ Terraform marker file exists
+✔ Terraform binary present
+```
+
+### The HERO MOMENT — Delete and Watch Self-Heal
+
+```bash
+kubectl delete nopresource.nop.crossplane.io demo-infrastructure --context k3d-crossplane
+```
+
+Count to 8. Re-apply:
+
+```bash
+kubectl apply --context k3d-crossplane -f - <<'EOF'
+apiVersion: nop.crossplane.io/v1alpha1
+kind: NopResource
+metadata:
+  name: demo-infrastructure
+spec:
+  forProvider:
+    conditionAfter:
+      - conditionType: Ready
+        conditionStatus: "True"
+        time: 5s
+      - conditionType: Synced
+        conditionStatus: "True"
+        time: 5s
+  writeConnectionSecretToRef:
+    namespace: crossplane-system
+    name: demo-infrastructure-conn
+EOF
+
+kubectl get managed --context k3d-crossplane
+```
+
+```
+NAME                  READY   SYNCED   AGE
+demo-infrastructure   True    True     8s
+```
+
+Back. No human intervention. That's the control-plane model.
+
+---
+
+## What You Built
+
+```
+k3d cluster: crossplane
+├── crossplane-system/
+│   ├── crossplane (controller manager)
+│   ├── crossplane-rbac-manager
+│   └── provider-nop (NOP provider pod)
+└── demo-infrastructure (NopResource — managed resource)
+
+/tmp/ep03-terraform-demo/
+├── main.tf (null_resource + local_file)
+└── terraform.tfstate
+```
+
+**The honest decision framework:**
+
+| Need | Tool |
+|------|------|
+| Continuous drift detection and auto-correction | Crossplane |
+| Developer self-service infrastructure via YAML | Crossplane |
+| Complex greenfield provisioning (VPCs, accounts) | Terraform |
+| Existing team with deep Terraform expertise | Terraform |
+| Platform team + GitOps + Kubernetes-native | Both (Terraform bootstraps cluster, Crossplane runs inside it) |
+
+The most common production pattern: **Terraform provisions the Kubernetes cluster. Crossplane runs inside it and provisions everything else.** They're complementary layers, not competitors.
+
+Full setup script, manifests, and demo walkthrough: [github.com/chruzie/tinkerwithtech](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep03-crossplane-vs-terraform)

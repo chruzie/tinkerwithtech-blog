@@ -1,0 +1,381 @@
+---
+title: "Kubernetes Operators Explained: Build One in 7 Minutes"
+date: "2026-02-27"
+description: "Build a real Kubernetes Operator from scratch with operator-sdk. CRD, controller, reconciliation loop, drift detection — all running on k3d in under 10 minutes. The complete homelab setup."
+season: 1
+episode: 2
+tags: ["kubernetes", "operators", "operator-sdk", "cncf", "golang", "controllers", "kubebuilder", "crds", "reconciliation"]
+---
+
+# Kubernetes Operators Explained
+
+Here's what most Kubernetes tutorials skip.
+
+Helm installs things. It pushes config into a cluster and walks away. If a Deployment gets deleted, its replica count gets manually changed, or a pod enters a crash loop — Helm has no idea. You have to run it again. You are the reconciliation loop.
+
+**An Operator eliminates that.** An Operator is a Go program that runs *inside* your cluster, watches a Custom Resource you define, and continuously enforces that reality matches the desired state. Not once on deploy. Continuously. Every time something changes, the controller's `Reconcile` function fires. It compares desired state to actual state and fixes any divergence.
+
+This post walks through building a real Operator with `operator-sdk`: from empty directory to a running controller that auto-creates Deployments, detects drift, and self-heals — all on a local k3d cluster.
+
+---
+
+## Prerequisites
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| `go` | Build the operator binary | [go.dev/dl](https://go.dev/dl) — requires 1.22+ |
+| `operator-sdk` | Scaffold operator project and API | See below |
+| `kubectl` | Kubernetes CLI | `brew install kubectl` |
+| `k3d` | Local k3s cluster in Docker | `brew install k3d` |
+| Docker | Required by k3d and to build operator image | [docker.com](https://www.docker.com) |
+
+**Install `operator-sdk`** (macOS arm64):
+
+```bash
+brew install operator-sdk
+```
+
+Or download the binary directly:
+
+```bash
+curl -sL "https://github.com/operator-framework/operator-sdk/releases/latest/download/operator-sdk_darwin_arm64" \
+  -o /usr/local/bin/operator-sdk
+chmod +x /usr/local/bin/operator-sdk
+```
+
+Verify everything is in place:
+
+```bash
+go version          # 1.22+
+operator-sdk version
+kubectl version --client
+k3d version
+docker info
+```
+
+Clone the episode repo:
+
+```bash
+git clone https://github.com/chruzie/tinkerwithtech.git
+cd tinkerwithtech/season1/ep02-kubernetes-operators
+```
+
+---
+
+## Architecture Overlay
+
+### Before: Helm as your "operator"
+
+In a standard Helm-managed cluster, you run `helm install` or `helm upgrade`. That's it. Helm renders templates and applies them to the cluster. If a resource drifts — a pod gets deleted, a replica count changes, a ConfigMap gets corrupted — Helm doesn't know and doesn't care until the next time you run a command.
+
+```
+Developer
+    │
+    ▼  helm install / helm upgrade (manual trigger)
+    │
+    ▼
+Kubernetes API
+    │
+    ▼
+Deployment / Service / ConfigMap
+
+Drift happens → nobody notices until next helm run
+```
+
+Helm is a deployment tool, not a control plane. There is no feedback loop.
+
+### After: A Kubernetes Operator
+
+An Operator introduces a **continuous reconciliation loop**. A custom controller runs inside your cluster, watches for Custom Resources (CRs), and fires its `Reconcile` function on every change:
+
+```
+Custom Resource (WebApp YAML)
+         │
+         ▼
+  Kubernetes API Server
+         │
+         ▼ (watch event)
+  WebApp Controller (running in-cluster)
+         │
+         ▼
+  Reconcile(ctx, req)
+     │
+     ├─ Get WebApp → check spec.replicas, spec.image
+     ├─ Does Deployment exist? No → Create it
+     ├─ Does Deployment match spec? No → Update it
+     └─ Update WebApp.Status.availableReplicas
+         │
+         ▼
+  Cluster actual state = desired state ✓
+```
+
+**Three core concepts:**
+
+1. **CRD (Custom Resource Definition)** — The schema that tells Kubernetes about your new resource type. Once installed, `kubectl apply -f webapp.yaml` is valid. Kubernetes validates it against the JSON Schema.
+
+2. **Custom Resource (CR)** — An instance of the CRD. Plain YAML with your domain's `apiVersion` and `kind`. This is the desired state input.
+
+3. **Controller** — A Go program running as a Pod. Watches CR objects. On any create/update/delete event: runs `Reconcile`, compares desired vs actual, converges. Uses owner references so child resources (like Deployments) are garbage-collected when the CR is deleted.
+
+**Why this matters over Helm:**
+- Drift is detected automatically (in milliseconds, not on next deploy)
+- Self-healing without human intervention
+- Declarative API — platform consumers just apply YAML
+- Owner references give you cascading deletion for free
+
+---
+
+## Step-by-Step Implementation
+
+The full demo script at `season1/ep02-kubernetes-operators/setup.sh` automates everything below. Run it once to see the full flow, then follow these steps to understand each piece.
+
+### Step 1 — Create the k3d cluster
+
+```bash
+k3d cluster create operators --agents 1 --wait --k3s-arg "--disable=traefik@server:0"
+kubectl config rename-context k3d-operators k3d-operators
+```
+
+### Step 2 — Scaffold the operator project
+
+```bash
+mkdir -p /tmp/ep02-webapp-operator && cd /tmp/ep02-webapp-operator
+
+operator-sdk init \
+  --domain tinkerwithtech.dev \
+  --repo github.com/chruzie/webapp-operator \
+  --plugins go/v4 \
+  --skip-go-version-check
+```
+
+> **`--skip-go-version-check`** is required if your Go is 1.22.x with operator-sdk v1.42+, which requires Go 1.23 at the plugin level but compiles fine with 1.22. You may also see `go: sigs.k8s.io/controller-tools requires go >= 1.24.0; switching to go1.25.7` — this is the Go toolchain auto-selector downloading build tools. The operator binary itself compiles with your installed Go version. It is not an error.
+
+> **Namespace note:** kustomize derives the controller namespace from your directory name: `/tmp/ep02-webapp-operator` → `ep02-webapp-operator-system`. The commands in Steps 5 and 6 use this exact name. If you use a different directory, substitute accordingly.
+
+```bash
+operator-sdk create api \
+  --group apps \
+  --version v1alpha1 \
+  --kind WebApp \
+  --resource \
+  --controller
+```
+
+This generates:
+- `api/v1alpha1/webapp_types.go` — the CRD spec struct
+- `internal/controller/webapp_controller.go` — the reconciler
+
+### Step 3 — Define the WebAppSpec
+
+Replace the generated `api/v1alpha1/webapp_types.go` with:
+
+```go
+type WebAppSpec struct {
+    // +kubebuilder:validation:Minimum=1
+    // +kubebuilder:validation:Maximum=10
+    // +kubebuilder:default=1
+    Replicas int32  `json:"replicas,omitempty"`
+    // +kubebuilder:default="nginx:alpine"
+    Image    string `json:"image,omitempty"`
+}
+
+type WebAppStatus struct {
+    AvailableReplicas int32              `json:"availableReplicas,omitempty"`
+    Conditions        []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+}
+```
+
+The `+kubebuilder:` annotation comments become JSON Schema validators in the CRD. Kubernetes rejects any WebApp object with `replicas > 10` automatically — no validation code required.
+
+### Step 4 — Write the reconciler
+
+The reconciler's job: get the WebApp, check if its Deployment exists, create or update it, update status. The key section:
+
+```go
+func (r *WebAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    logger := log.FromContext(ctx)
+
+    webapp := &appsv1alpha1.WebApp{}
+    if err := r.Get(ctx, req.NamespacedName, webapp); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+
+    logger.Info("Reconciling WebApp", "name", webapp.Name,
+        "replicas", webapp.Spec.Replicas, "image", webapp.Spec.Image)
+
+    // Check if Deployment exists
+    deploy := &appsv1.Deployment{}
+    err := r.Get(ctx, types.NamespacedName{Name: webapp.Name + "-deployment",
+        Namespace: webapp.Namespace}, deploy)
+    if errors.IsNotFound(err) {
+        // Create it
+        newDeploy := r.deploymentForWebApp(webapp)
+        ctrl.SetControllerReference(webapp, newDeploy, r.Scheme)
+        return ctrl.Result{Requeue: true}, r.Create(ctx, newDeploy)
+    }
+
+    // Drift detection: does actual state match desired?
+    if *deploy.Spec.Replicas != webapp.Spec.Replicas ||
+        deploy.Spec.Template.Spec.Containers[0].Image != webapp.Spec.Image {
+        logger.Info("Drift detected — updating Deployment")
+        deploy.Spec.Replicas = &webapp.Spec.Replicas
+        deploy.Spec.Template.Spec.Containers[0].Image = webapp.Spec.Image
+        r.Update(ctx, deploy)
+    }
+
+    // Update status
+    webapp.Status.AvailableReplicas = deploy.Status.AvailableReplicas
+    return ctrl.Result{}, r.Status().Update(ctx, webapp)
+}
+```
+
+`ctrl.SetControllerReference` is the key line: it sets owner references on the Deployment, which means Kubernetes garbage-collects the Deployment automatically when the WebApp CR is deleted.
+
+### Step 5 — Build and load the operator image
+
+```bash
+cd /tmp/webapp-operator
+
+# Generate manifests (CRD YAML, RBAC) from kubebuilder annotations
+make manifests generate
+
+# Compile the controller binary
+make build
+
+# Build Docker image with a non-latest tag to avoid imagePullPolicy:Always
+make docker-build IMG="webapp-operator:dev"
+
+# Load into k3d (no registry push needed)
+k3d image import webapp-operator:dev -c operators
+```
+
+> **Critical:** Use a non-`:latest` tag (e.g. `:dev`). With `:latest`, Kubernetes sets `imagePullPolicy: Always` by default and tries to pull from Docker Hub — which fails for a local-only image. Any other tag defaults to `IfNotPresent`.
+
+### Step 6 — Deploy the operator
+
+```bash
+# Install the CRD into the cluster
+make install
+
+# Deploy the controller manager + RBAC
+make deploy IMG="webapp-operator:dev"
+
+# Watch the controller manager start
+kubectl rollout status deployment/ep02-webapp-operator-controller-manager \
+  -n ep02-webapp-operator-system --context k3d-operators
+```
+
+> The namespace is auto-generated as `[directory-name]-system` by kustomize (e.g. `/tmp/ep02-webapp-operator` → `ep02-webapp-operator-system`). Adjust accordingly.
+
+### Step 7 — Apply a WebApp CR
+
+```bash
+kubectl create namespace webapp-demo --context k3d-operators
+
+kubectl apply --context k3d-operators -f - <<EOF
+apiVersion: apps.tinkerwithtech.dev/v1alpha1
+kind: WebApp
+metadata:
+  name: my-webapp
+  namespace: webapp-demo
+spec:
+  replicas: 2
+  image: "nginx:alpine"
+EOF
+```
+
+Or use the included manifest:
+
+```bash
+kubectl apply -f manifests/webapp-sample.yaml --context k3d-operators
+```
+
+---
+
+## Verification
+
+### Check the CRD is registered
+
+```bash
+kubectl get crds --context k3d-operators | grep tinkerwithtech
+# webapps.apps.tinkerwithtech.dev   <timestamp>
+```
+
+### Watch the reconciliation loop fire
+
+This is the HERO MOMENT — the controller logs prove the loop is alive:
+
+```bash
+kubectl logs -n ep02-webapp-operator-system \
+  -l control-plane=controller-manager \
+  --context k3d-operators \
+  --tail=20
+```
+
+Expected output:
+```
+INFO  Reconciling WebApp  {"controller": "webapp", "name": "my-webapp",
+      "replicas": 2, "image": "nginx:alpine", "reconcileID": "..."}
+INFO  Creating Deployment for WebApp  {"deployment": "my-webapp-deployment"}
+INFO  Deployment created  {"deployment": "my-webapp-deployment"}
+```
+
+### Confirm the operator created the Deployment
+
+```bash
+kubectl get pods -n webapp-demo --context k3d-operators
+# NAME                                    READY   STATUS    RESTARTS   AGE
+# my-webapp-deployment-xxx-yyy            1/1     Running   0          30s
+# my-webapp-deployment-xxx-zzz            1/1     Running   0          30s
+
+kubectl get deployment my-webapp-deployment -n webapp-demo --context k3d-operators
+# NAME                   READY   UP-TO-DATE   AVAILABLE   AGE
+# my-webapp-deployment   2/2     2            2           30s
+```
+
+No `kubectl create deployment`. No Helm. The operator did this from the WebApp CR alone.
+
+### Demonstrate drift detection — delete the Deployment
+
+```bash
+kubectl delete deployment my-webapp-deployment -n webapp-demo --context k3d-operators
+sleep 8
+kubectl get pods -n webapp-demo --context k3d-operators
+# Two new pods appear — operator detected the deletion and recreated the Deployment
+```
+
+### Run the built-in verification script
+
+```bash
+./setup.sh --verify
+# Results: 11 passed / 0 failed
+# ✔ All checks passed — homelab is recording-ready
+```
+
+---
+
+## What You Built
+
+Running on your local k3d cluster:
+
+```
+k3d cluster: operators
+├── ep02-webapp-operator-system/
+│   └── ep02-webapp-operator-controller-manager (Pod)
+│       └── WebApp reconciler — watches webapps.apps.tinkerwithtech.dev
+│
+└── webapp-demo/
+    ├── WebApp/my-webapp (desired state: 2 replicas, nginx:alpine)
+    └── Deployment/my-webapp-deployment (owned by WebApp CR)
+        ├── Pod/my-webapp-deployment-xxx-yyy (Running)
+        └── Pod/my-webapp-deployment-xxx-zzz (Running)
+```
+
+The reconciliation loop enforces desired state continuously:
+- **Deployment deleted** → controller re-creates it in ~2s
+- **Replicas changed on the Deployment directly** → controller reverts it
+- **WebApp CR deleted** → owner references cascade-delete the Deployment and all pods
+
+This is the entire Operator pattern. Database operators, certificate operators, GitOps operators — they're all just more complex variations of this same structure.
+
+The full demo script (including cluster creation, operator build, and teardown) is at [github.com/chruzie/tinkerwithtech/tree/main/season1/ep02-kubernetes-operators](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep02-kubernetes-operators). Every command is reproducible on a laptop with Go, Docker, and k3d installed.
