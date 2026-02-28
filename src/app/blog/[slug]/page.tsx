@@ -66,7 +66,7 @@ const components = {
         <ol className="mb-6 text-foreground/85 space-y-1.5 list-decimal pl-5" {...props} />
     ),
     li: (props: any) => (
-        <li className="flex gap-2 leading-relaxed before:content-['▸'] before:text-accent/60 before:mt-0.5 before:flex-shrink-0 [ol_&]:before:content-none [ol_&]:pl-1" {...props} />
+        <li className="flex gap-2 leading-relaxed before:content-['▸'] before:text-accent/60 before:mt-0.5 before:flex-shrink-0 [ol_&]:before:content-none [ol_&]:pl-1 [&>p]:m-0 [&>p]:inline" {...props} />
     ),
     blockquote: (props: any) => (
         <blockquote className="relative border-l-4 border-accent/60 pl-5 pr-4 py-3 my-6 bg-accent/5 rounded-r-lg text-foreground/75 italic" {...props} />

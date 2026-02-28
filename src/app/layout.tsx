@@ -28,7 +28,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground min-h-screen flex flex-col items-center selection:bg-accent/30 selection:text-accent`}
       >
-        <div className="w-full max-w-2xl px-6 py-12 md:py-20 flex flex-col flex-grow">
+        <div className="w-full max-w-2xl px-6 py-12 md:py-20 flex flex-col flex-grow overflow-x-hidden">
           <nav className="flex items-center justify-between mb-16 text-sm font-medium text-secondary/70">
             <Link href="/" className="hover:text-accent transition-colors">
               TinkerWithTech
