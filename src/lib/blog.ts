@@ -13,6 +13,7 @@ export type BlogPost = {
     season?: number;
     episode?: number;
     tags?: string[];
+    published?: boolean;
 };
 
 export function getPostSlugs() {
@@ -37,6 +38,7 @@ export function getPostBySlug(slug: string): BlogPost {
         season: data.season ?? undefined,
         episode: data.episode ?? undefined,
         tags: data.tags ?? undefined,
+        published: data.published ?? true, // default true — omitting published = visible
     };
 }
 
@@ -45,6 +47,7 @@ export function getAllPosts(): BlogPost[] {
     const posts = slugs
         .filter((slug) => slug.endsWith('.mdx'))
         .map((slug) => getPostBySlug(slug))
+        .filter((post) => post.published !== false)
         .sort((post1, post2) => (post1.date > post2.date ? -1 : 1));
     return posts;
 }
