@@ -33,19 +33,28 @@ No language SDK, no cloud credentials — everything runs inside the cluster.
 ## Architecture
 
 <Diagram>
-graph TD
-  App["Your App\nany language"] -->|"OTLP gRPC :4317\nor HTTP :4318"| Collector
-
-  subgraph Collector["OTel Collector"]
-    Recv["Receivers\notlp, prometheus"]
-    Proc["Processors\nmemory_limiter, batch"]
-    Exp["Exporters\ndebug, prometheusremotewrite"]
-    Recv --> Proc --> Exp
-  end
-
-  Exp -->|"remote_write"| Prom["Prometheus"]
-  Prom --> Grafana["Grafana"]
-  Exp -->|"debug logs"| Logs["Collector stdout\n(traces + logs)"]
+{`Your App (any language)
+   │  OTLP gRPC :4317 or HTTP :4318
+   ▼
+┌─────────────────────────────────────────┐
+│              OTel Collector             │
+│                                         │
+│  Receivers        otlp, prometheus      │
+│       │                                 │
+│       ▼                                 │
+│  Processors       memory_limiter, batch │
+│       │                                 │
+│       ▼                                 │
+│  Exporters        debug, prometheusrw   │
+└──────────────────────┬──────────────────┘
+                       │
+          ┌────────────┴────────────┐
+          │ remote_write            │ debug logs
+          ▼                         ▼
+      Prometheus            Collector stdout
+          │                  (traces + logs)
+          ▼
+        Grafana`}
 </Diagram>
 
 The Collector is the **central bus**. It decouples your application instrumentation from your observability backends. Swap Jaeger in for traces, Loki for logs — without changing a single line of application code.
@@ -335,4 +344,4 @@ sample-app/
 | Remote-write receiver | Must enable on Prometheus: `--web.enable-remote-write-receiver` or the Helm flag above |
 | CNCF momentum | #2 most active CNCF project — SDK support spans 11+ languages |
 
-Full source: [github.com/chruzie/tinkerwithtech/tree/main/season1/ep04-opentelemetry](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep04-opentelemetry)
+Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)

@@ -43,10 +43,15 @@ cd tinkerwithtech/season1/ep02-kubernetes-operators
 ### Without an Operator
 
 <Diagram>
-graph LR
-  Dev["Developer"] -->|"helm install\n(manual trigger)"| API["Kubernetes API"]
-  API --> Resources["Deployment / Service\nConfigMap"]
-  Resources -.->|"drift happens\nno feedback loop"| Gap["⚠ Invisible until\nnext helm run"]
+{`Developer
+   │
+   │  helm install (manual trigger)
+   ▼
+Kubernetes API ──► Deployment / Service / ConfigMap
+                             │
+                             │  drift happens — no feedback loop
+                             ▼
+                    ⚠ Invisible until next helm run`}
 </Diagram>
 
 Helm is a deployment tool, not a control plane. It renders templates, applies them, and stops. Drift is your problem.
@@ -54,15 +59,22 @@ Helm is a deployment tool, not a control plane. It renders templates, applies th
 ### With an Operator
 
 <Diagram>
-graph TD
-  CR["WebApp CR\nspec.replicas: 2\nspec.image: nginx:alpine"] --> API["Kubernetes API Server"]
-  API -->|"watch event"| Ctrl["WebApp Controller\nrunning in-cluster"]
-  Ctrl --> Reconcile["Reconcile()"]
-  Reconcile -->|"Deployment missing?"| Create["Create Deployment\n+ set ownerRef"]
-  Reconcile -->|"Spec drifted?"| Update["Patch Deployment"]
-  Reconcile --> StatusUpdate["Update status.\navailableReplicas"]
-  Create --> Converged["✔ actual = desired"]
-  Update --> Converged
+{`WebApp CR                    Kubernetes API Server
+spec.replicas: 2    ──────►        │
+spec.image: nginx:alpine           │ watch event
+                                   ▼
+                          WebApp Controller (in-cluster)
+                                   │
+                              Reconcile()
+                            ┌──────┴───────┐
+                            │              │
+                 Deployment missing?   Spec drifted?
+                            │              │
+                     Create Deployment   Patch Deployment
+                     + set ownerRef           │
+                            └──────┬──────────┘
+                                   ▼
+                          ✔ actual = desired`}
 </Diagram>
 
 **Three core concepts:**
@@ -313,4 +325,4 @@ k3d cluster: operators
 
 The loop enforces desired state continuously — delete the Deployment and it's back in ~2s; delete the WebApp CR and the Deployment cascades away. Database operators, certificate operators, GitOps operators — all variations of this same structure.
 
-Full source: [github.com/chruzie/tinkerwithtech/tree/main/season1/ep02-kubernetes-operators](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep02-kubernetes-operators)
+Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)

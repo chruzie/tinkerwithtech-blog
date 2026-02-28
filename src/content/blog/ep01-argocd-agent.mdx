@@ -144,36 +144,36 @@ chmod +x argocd-agentctl && sudo mv argocd-agentctl /usr/local/bin/
 Traditional Argo CD stores kubeconfig secrets on the hub. The application-controller pushes manifests outward. Every workload cluster exposes its API server.
 
 <Diagram>
-graph TD
-  subgraph Hub["Hub Cluster (Argo CD)"]
-    S["argocd-server"]
-    AC["application-controller"]
-    K1["kubeconfig-workload-1 🔑"]
-    K2["kubeconfig-workload-2 🔑"]
-    KN["kubeconfig-workload-N 🔑"]
-  end
-  K1 -->|outbound push| W1["Workload-1\n⚠ API server exposed"]
-  K2 -->|outbound push| W2["Workload-2\n⚠ API server exposed"]
-  KN -->|outbound push| WN["Workload-N\n⚠ API server exposed"]
+{`┌─────────────────────────────────────────────────────┐
+│              Hub Cluster (Argo CD)                  │
+│                                                     │
+│  argocd-server   application-controller             │
+│                                                     │
+│  kubeconfig-workload-1 🔑 ──────────────────────►  │──► Workload-1  ⚠ API exposed
+│  kubeconfig-workload-2 🔑 ──────────────────────►  │──► Workload-2  ⚠ API exposed
+│  kubeconfig-workload-N 🔑 ──────────────────────►  │──► Workload-N  ⚠ API exposed
+│                         outbound push               │
+└─────────────────────────────────────────────────────┘`}
 </Diagram>
 
 argocd-agent reverses the direction. Agents dial out to the principal on the hub over gRPC + mTLS. The hub stores no kubeconfig secrets and makes no inbound connections.
 
 <Diagram>
-graph TD
-  subgraph Hub["Hub Cluster"]
-    P["argocd-agent-principal\ngRPC server :8443"]
-    S["argocd-server"]
-    AC["application-controller\n(scaled to 0)"]
-  end
-  W1 -->|"gRPC + mTLS\nagents dial OUT"| P
-  W2 -->|"gRPC + mTLS\nagents dial OUT"| P
-  subgraph W1["Workload-1"]
-    A1["argocd-agent\napplication-controller\n✔ egress-only"]
-  end
-  subgraph W2["Workload-2"]
-    A2["argocd-agent\napplication-controller\n✔ egress-only"]
-  end
+{`┌──────────────────────────────┐     ┌──────────────────────────────────┐
+│         Workload-1           │     │         Hub Cluster              │
+│                              │     │                                  │
+│  argocd-agent                │     │  argocd-agent-principal          │
+│  application-controller      │──►──│  gRPC server :8443               │
+│  ✔ egress-only               │     │                                  │
+└──────────────────────────────┘     │  argocd-server                   │
+                                     │  application-controller (→ 0)    │
+┌──────────────────────────────┐     └──────────────────────────────────┘
+│         Workload-2           │              ▲
+│                              │              │
+│  argocd-agent                │──────────────┘  gRPC + mTLS
+│  application-controller      │                 agents dial OUT
+│  ✔ egress-only               │
+└──────────────────────────────┘`}
 </Diagram>
 
 Workload clusters need zero inbound firewall rules. Outbound port 8443 suffices. No kubeconfig secrets on the hub means nothing to rotate or leak. Each agent authenticates with a unique mTLS client certificate issued by your CA.
@@ -814,7 +814,7 @@ This scales to hundreds of workload clusters without adding attack surface to yo
 
 ## Next Steps
 
-- GitHub repo: [github.com/chruzie/tinkerwithtech](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep01-argocd-agent)
+- YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)
 - CNCF Slack: [#argo](https://cloud-native.slack.com/archives/C01TSKR0K4R)
 - argocd-agent docs: [argoproj-labs/argocd-agent](https://github.com/argoproj-labs/argocd-agent)
 

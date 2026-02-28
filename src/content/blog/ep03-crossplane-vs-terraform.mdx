@@ -35,13 +35,16 @@ The demo uses the **Crossplane NOP provider** (no-op — behaves exactly like a 
 ### The Terraform model — pipeline
 
 <Diagram>
-graph LR
-  Dev["Developer"] -->|"HCL file"| TF["terraform apply\n(manual trigger)"]
-  TF -->|"API call"| Cloud["Cloud Resource\nCreated"]
-  Cloud -->|"state stored"| State["terraform.tfstate"]
-  State -.->|"drift invisible\nuntil next plan"| Drift["⚠ Config drift\nnobody notices"]
-  Dev -.->|"hours or days later"| Plan["terraform plan"]
-  Plan --> State
+{`Developer ──(HCL file)──► terraform apply ──(API call)──► Cloud Resource Created
+                          (manual trigger)                         │
+                                                          state stored
+                                                                   │
+                                                        terraform.tfstate
+                                                                   │
+                                               drift invisible until next plan
+                                                                   ▼
+                                                      ⚠ Config drift — nobody notices
+                                                      (hours or days before detection)`}
 </Diagram>
 
 Terraform is a **pipeline tool**. You invoke it, it provisions, it stores state, then it waits until you run it again. Drift is invisible until the next `terraform plan`. In a busy team, that gap can be hours or days.
@@ -49,13 +52,23 @@ Terraform is a **pipeline tool**. You invoke it, it provisions, it stores state,
 ### The Crossplane model — control plane
 
 <Diagram>
-graph TD
-  Dev["Developer"] -->|"kubectl apply\nYAML CR"| API["Kubernetes API Server"]
-  API -->|"watch event"| Ctrl["Crossplane Controller"]
-  Ctrl -->|"reconcile"| Cloud["Cloud API\nor NOP provider"]
-  Cloud --> Managed["Resource: Ready + Synced"]
-  Managed -->|"continuous watch"| Ctrl
-  Ctrl -->|"drift detected"| Reconcile["Auto-correct\nin milliseconds"]
+{`Developer
+   │  kubectl apply YAML CR
+   ▼
+Kubernetes API Server
+   │  watch event
+   ▼
+Crossplane Controller ◄──────────────────────┐
+   │  reconcile                               │
+   ▼                                          │
+Cloud API / NOP provider                      │ continuous watch
+   │                                          │
+   ▼                                          │
+Resource: Ready + Synced ─────────────────────┘
+   │
+   │  drift detected?
+   ▼
+Auto-correct in milliseconds`}
 </Diagram>
 
 Crossplane runs a **Kubernetes controller** inside your cluster. It watches Custom Resource objects and continuously reconciles the real world to match them. Drift is not a scheduled event — it's detected and corrected in the same reconciliation loop that fires on every watch event.
@@ -322,4 +335,4 @@ Back in 8 seconds. No human intervention. That's the control-plane model.
 
 The most common production pattern: **Terraform provisions the Kubernetes cluster. Crossplane runs inside it and provisions everything else.** They're complementary layers, not competitors.
 
-Full source: [github.com/chruzie/tinkerwithtech/tree/main/season1/ep03-crossplane-vs-terraform](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep03-crossplane-vs-terraform)
+Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)

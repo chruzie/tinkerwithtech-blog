@@ -29,6 +29,7 @@ function isDiagram(code: string, language: string): boolean {
 
 export function CodeBlock({ children, className }: CodeBlockProps) {
     const [copied, setCopied] = useState(false);
+    const [wrapped, setWrapped] = useState(false);
 
     // MDX passes className as `language-<lang>` on the <code> child
     let extractedClassName = className || "";
@@ -88,7 +89,16 @@ export function CodeBlock({ children, className }: CodeBlockProps) {
                         <div className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" />
                         <div className="w-2.5 h-2.5 rounded-full bg-[#27c93f]" />
                     </div>
-                    <span className="text-xs text-foreground/30 font-mono select-none">bash</span>
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={() => setWrapped(w => !w)}
+                            className={`text-xs font-mono px-2 py-0.5 rounded border transition-colors ${wrapped ? 'text-accent border-accent/40 bg-accent/10' : 'text-foreground/30 border-foreground/15 hover:text-foreground/50'}`}
+                            title="Toggle word wrap"
+                        >
+                            wrap
+                        </button>
+                        <span className="text-xs text-foreground/30 font-mono select-none">bash</span>
+                    </div>
                 </div>
             ) : language ? (
                 <div className="px-4 py-2 bg-[#201e2b] border-b border-white/5 flex items-center">
@@ -104,8 +114,8 @@ export function CodeBlock({ children, className }: CodeBlockProps) {
                 {copied ? "✓ copied" : "copy"}
             </button>
 
-            <div className="p-5 overflow-x-auto">
-                <pre className={`language-${language} m-0 p-0 bg-transparent text-sm leading-relaxed`} suppressHydrationWarning>
+            <div className={`p-5 ${isTerminal && wrapped ? 'overflow-x-hidden' : 'overflow-x-auto'}`}>
+                <pre className={`language-${language} m-0 p-0 bg-transparent text-sm leading-relaxed ${isTerminal && wrapped ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'}`} suppressHydrationWarning>
                     <code
                         className="font-mono text-[#cdd6f4]"
                         dangerouslySetInnerHTML={{ __html: htmlResult }}

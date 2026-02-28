@@ -10,6 +10,7 @@ import { Step } from '@/components/Step';
 import { ExpectedOutput } from '@/components/ExpectedOutput';
 import { Diagram } from '@/components/Diagram';
 import remarkGfm from 'remark-gfm';
+import rehypeSlug from 'rehype-slug';
 
 export async function generateStaticParams() {
     const posts = getPostSlugs();
@@ -189,7 +190,7 @@ export default async function BlogPost(props: { params: Promise<{ slug: string }
                 <MDXRemote
                     source={post.content}
                     components={components}
-                    options={{ mdxOptions: { remarkPlugins: [remarkGfm] } }}
+                    options={{ mdxOptions: { remarkPlugins: [remarkGfm], rehypePlugins: [rehypeSlug] } }}
                 />
             </div>
 
