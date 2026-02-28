@@ -55,8 +55,8 @@ export function CodeBlock({ children, className }: CodeBlockProps) {
     // terminal chrome, no copy button, just readable monospace art.
     if (isDiagram(codeString, language)) {
         return (
-            <figure className="my-8 rounded-xl border border-foreground/10 bg-foreground/[0.025] overflow-x-auto not-prose">
-                <pre className="p-6 m-0 font-mono text-sm text-foreground/60 leading-snug whitespace-pre">
+            <figure className="my-8 rounded-xl border border-foreground/10 bg-foreground/[0.025] overflow-x-auto not-prose w-full">
+                <pre className="p-6 m-0 font-mono text-[0.8rem] text-foreground/60 leading-snug whitespace-pre inline-block min-w-full">
                     {codeString}
                 </pre>
             </figure>
