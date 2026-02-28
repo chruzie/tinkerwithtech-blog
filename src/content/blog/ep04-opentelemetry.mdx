@@ -32,8 +32,7 @@ No language SDK, no cloud credentials — everything runs inside the cluster.
 
 ## Architecture
 
-<Diagram>
-{`Your App (any language)
+<Diagram content={`Your App (any language)
    │  OTLP gRPC :4317 or HTTP :4318
    ▼
 ┌─────────────────────────────────────────┐
@@ -54,8 +53,7 @@ No language SDK, no cloud credentials — everything runs inside the cluster.
       Prometheus            Collector stdout
           │                  (traces + logs)
           ▼
-        Grafana`}
-</Diagram>
+        Grafana`} />
 
 The Collector is the **central bus**. It decouples your application instrumentation from your observability backends. Swap Jaeger in for traces, Loki for logs — without changing a single line of application code.
 

@@ -143,8 +143,7 @@ chmod +x argocd-agentctl && sudo mv argocd-agentctl /usr/local/bin/
 
 Traditional Argo CD stores kubeconfig secrets on the hub. The application-controller pushes manifests outward. Every workload cluster exposes its API server.
 
-<Diagram>
-{`┌─────────────────────────────────────────────────────┐
+<Diagram content={`┌─────────────────────────────────────────────────────┐
 │              Hub Cluster (Argo CD)                  │
 │                                                     │
 │  argocd-server   application-controller             │
@@ -153,13 +152,11 @@ Traditional Argo CD stores kubeconfig secrets on the hub. The application-contro
 │  kubeconfig-workload-2 🔑 ──────────────────────►  │──► Workload-2  ⚠ API exposed
 │  kubeconfig-workload-N 🔑 ──────────────────────►  │──► Workload-N  ⚠ API exposed
 │                         outbound push               │
-└─────────────────────────────────────────────────────┘`}
-</Diagram>
+└─────────────────────────────────────────────────────┘`} />
 
 argocd-agent reverses the direction. Agents dial out to the principal on the hub over gRPC + mTLS. The hub stores no kubeconfig secrets and makes no inbound connections.
 
-<Diagram>
-{`┌──────────────────────────────┐     ┌──────────────────────────────────┐
+<Diagram content={`┌──────────────────────────────┐     ┌──────────────────────────────────┐
 │         Workload-1           │     │         Hub Cluster              │
 │                              │     │                                  │
 │  argocd-agent                │     │  argocd-agent-principal          │
@@ -173,8 +170,7 @@ argocd-agent reverses the direction. Agents dial out to the principal on the hub
 │  argocd-agent                │──────────────┘  gRPC + mTLS
 │  application-controller      │                 agents dial OUT
 │  ✔ egress-only               │
-└──────────────────────────────┘`}
-</Diagram>
+└──────────────────────────────┘`} />
 
 Workload clusters need zero inbound firewall rules. Outbound port 8443 suffices. No kubeconfig secrets on the hub means nothing to rotate or leak. Each agent authenticates with a unique mTLS client certificate issued by your CA.
 

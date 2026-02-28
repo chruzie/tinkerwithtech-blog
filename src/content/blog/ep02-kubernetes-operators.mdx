@@ -42,8 +42,7 @@ cd tinkerwithtech/season1/ep02-kubernetes-operators
 
 ### Without an Operator
 
-<Diagram>
-{`Developer
+<Diagram content={`Developer
    │
    │  helm install (manual trigger)
    ▼
@@ -51,15 +50,13 @@ Kubernetes API ──► Deployment / Service / ConfigMap
                              │
                              │  drift happens — no feedback loop
                              ▼
-                    ⚠ Invisible until next helm run`}
-</Diagram>
+                    ⚠ Invisible until next helm run`} />
 
 Helm is a deployment tool, not a control plane. It renders templates, applies them, and stops. Drift is your problem.
 
 ### With an Operator
 
-<Diagram>
-{`WebApp CR                    Kubernetes API Server
+<Diagram content={`WebApp CR                    Kubernetes API Server
 spec.replicas: 2    ──────►        │
 spec.image: nginx:alpine           │ watch event
                                    ▼
@@ -74,8 +71,7 @@ spec.image: nginx:alpine           │ watch event
                      + set ownerRef           │
                             └──────┬──────────┘
                                    ▼
-                          ✔ actual = desired`}
-</Diagram>
+                          ✔ actual = desired`} />
 
 **Three core concepts:**
 
