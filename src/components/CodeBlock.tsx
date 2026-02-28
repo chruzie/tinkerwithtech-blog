@@ -109,6 +109,7 @@ export function CodeBlock({ children, className }: CodeBlockProps) {
                     <code
                         className="font-mono text-[#cdd6f4]"
                         dangerouslySetInnerHTML={{ __html: htmlResult }}
+                        suppressHydrationWarning
                     />
                 </pre>
             </div>
