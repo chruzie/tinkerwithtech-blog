@@ -4,6 +4,11 @@ import { MDXRemote } from 'next-mdx-remote/rsc';
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { CodeBlock } from '@/components/CodeBlock';
+import { Callout } from '@/components/Callout';
+import { Tabs, Tab } from '@/components/Tabs';
+import { Step } from '@/components/Step';
+import { ExpectedOutput } from '@/components/ExpectedOutput';
+import { Diagram } from '@/components/Diagram';
 import remarkGfm from 'remark-gfm';
 
 export async function generateStaticParams() {
@@ -42,6 +47,12 @@ function formatDate(raw: string): string {
 }
 
 const components = {
+    Callout,
+    Tabs,
+    Tab,
+    Step,
+    ExpectedOutput,
+    Diagram,
     h1: (props: any) => (
         <h1 className="text-2xl font-semibold mt-12 mb-4 text-secondary tracking-tight scroll-mt-20 group" {...props}>
             <span>{props.children}</span>

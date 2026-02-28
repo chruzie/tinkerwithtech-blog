@@ -1,22 +1,20 @@
 ---
 title: "OpenTelemetry in 7 Minutes: One Pipeline for Traces, Metrics, and Logs"
 date: "2026-02-27"
-description: "Most observability stacks have three SDKs, three dashboards, and no correlation. OpenTelemetry collapses all of them into one pipeline. Here's the full homelab setup with OTel Collector, Prometheus, and Grafana on k3d — zero cloud required."
+description: "Most observability stacks have three SDKs, three dashboards, and no correlation. OpenTelemetry collapses all of them into one pipeline. Full homelab setup with OTel Collector, Prometheus, and Grafana on k3d — zero cloud required."
 season: 1
 episode: 4
 tags: ["opentelemetry", "otel", "observability", "kubernetes", "cncf", "prometheus", "grafana", "tracing", "metrics", "logs", "otlp"]
 published: false
 ---
 
-# OpenTelemetry in 7 Minutes
-
 Here's the silent tax every observability stack accumulates.
 
-Prometheus client library in the app. Jaeger agent sidecar. Loki log shipper. Three SDKs to maintain, three backends to configure, three dashboards to check when something breaks — and no way to correlate a trace with a metric spike unless you've wired up exemplars by hand.
+Prometheus client library in the app. Jaeger agent sidecar. Loki log shipper. Three SDKs to maintain, three backends to configure, three dashboards to check — and no way to correlate a trace with a metric spike unless you've wired up exemplars by hand.
 
-OpenTelemetry eliminates this. One SDK. One wire protocol (OTLP). One Collector that receives all three signals and routes them to whatever backends you already use. Your Prometheus, Grafana, and Jaeger setups stay unchanged — you just stop maintaining three separate instrumentation libraries.
+**OpenTelemetry eliminates this.** One SDK. One wire protocol (OTLP). One Collector that receives all three signals and routes them to whatever backends you already use. Your Prometheus, Grafana, and Jaeger setups stay unchanged — you just stop maintaining three separate instrumentation libraries.
 
-This post walks through a complete homelab deployment: OTel Collector with a multi-signal pipeline, Prometheus with remote-write receiver, Grafana, and a sample app emitting real OTLP data — all on a local k3d cluster, no cloud account needed.
+This post walks through a complete homelab deployment: OTel Collector with a multi-signal pipeline, Prometheus with remote-write receiver, Grafana, and a sample app emitting real OTLP data — all on k3d.
 
 ---
 
@@ -28,66 +26,60 @@ This post walks through a complete homelab deployment: OTel Collector with a mul
 | `k3d` | `brew install k3d` |
 | `helm` | `brew install helm` |
 
-That's it. No language SDK, no cloud credentials — everything runs inside the cluster.
+No language SDK, no cloud credentials — everything runs inside the cluster.
 
 ---
 
-## Architecture: The OTel Collector Pipeline
+## Architecture
 
-```
-Your App (any language)
-      │
-      │  OTLP (gRPC :4317 or HTTP :4318)
-      ▼
-┌─────────────────────────────────────────┐
-│          OTel Collector                 │
-│                                         │
-│  Receivers:   otlp, prometheus          │
-│  Processors:  memory_limiter, batch     │
-│  Exporters:   debug, prometheusremote   │
-│                                         │
-│  Pipelines:                             │
-│    traces:  [otlp] → [batch] → [debug]  │
-│    metrics: [otlp,prom] → [batch]       │
-│                → [debug, promremote]    │
-│    logs:    [otlp] → [batch] → [debug]  │
-└────────────────┬────────────────────────┘
-                 │
-        remote_write (HTTP)
-                 │
-                 ▼
-          Prometheus ──→ Grafana
-```
+<Diagram>
+graph TD
+  App["Your App\nany language"] -->|"OTLP gRPC :4317\nor HTTP :4318"| Collector
 
-The Collector is the **central bus**. It decouples your application instrumentation from your observability backends. Swap backends — Jaeger instead of debug for traces, Loki for logs — without changing a single line of application code.
+  subgraph Collector["OTel Collector"]
+    Recv["Receivers\notlp, prometheus"]
+    Proc["Processors\nmemory_limiter, batch"]
+    Exp["Exporters\ndebug, prometheusremotewrite"]
+    Recv --> Proc --> Exp
+  end
 
-### Why the Collector matters
+  Exp -->|"remote_write"| Prom["Prometheus"]
+  Prom --> Grafana["Grafana"]
+  Exp -->|"debug logs"| Logs["Collector stdout\n(traces + logs)"]
+</Diagram>
 
-Without OTel: your app speaks Prometheus format directly, or runs a Jaeger agent sidecar, or a Fluentd log shipper. Each integration has its own config format, its own failure mode, and its own upgrade path.
+The Collector is the **central bus**. It decouples your application instrumentation from your observability backends. Swap Jaeger in for traces, Loki for logs — without changing a single line of application code.
 
-With OTel: your app speaks OTLP to the Collector. The Collector translates. Your backends evolve independently. The Collector itself is stateless and horizontally scalable.
+**Why the Collector matters:** without it, your app speaks Prometheus format directly, or runs a Jaeger agent sidecar, or a Fluentd log shipper — each with its own config format, failure mode, and upgrade path. With OTel, your app speaks OTLP to the Collector. The Collector translates. Backends evolve independently.
 
 ---
 
-## Step-by-Step: Full Homelab Setup
+## Setup
 
-### Step 1 — Create the k3d cluster
+<Step number={1} title="Create the k3d cluster" time="~1 min">
 
 ```bash
 k3d cluster create otel --agents 1 --wait \
   --k3s-arg "--disable=traefik@server:0"
 kubectl config rename-context k3d-otel k3d-otel 2>/dev/null || true
-kubectl cluster-info --context k3d-otel
 ```
 
-### Step 2 — Create namespaces
+<Callout type="check">
+`kubectl cluster-info --context k3d-otel` returns without error.
+</Callout>
+
+</Step>
+
+<Step number={2} title="Create namespaces" time="~30 sec">
 
 ```bash
 kubectl create namespace observability --context k3d-otel
 kubectl create namespace sample-app --context k3d-otel
 ```
 
-### Step 3 — Install kube-prometheus-stack (Prometheus + Grafana)
+</Step>
+
+<Step number={3} title="Install kube-prometheus-stack" time="~5 min">
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -106,9 +98,17 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --wait --timeout=300s
 ```
 
-**Important:** `enableRemoteWriteReceiver=true` is required. Without it, the OTel Collector's `prometheusremotewrite` exporter will fail with a 404 — Prometheus rejects remote write requests by default.
+<Callout type="warning">
+`enableRemoteWriteReceiver=true` is required. Without it, the OTel Collector's `prometheusremotewrite` exporter fails with a 404 — Prometheus rejects remote write requests by default.
+</Callout>
 
-### Step 4 — Install the OTel Collector
+```bash
+kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability --context k3d-otel
+```
+
+</Step>
+
+<Step number={4} title="Install the OTel Collector" time="~3 min">
 
 ```bash
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
@@ -187,17 +187,19 @@ ports:
 HELM_VALUES
 ```
 
-**Note:** `image.repository=otel/opentelemetry-collector-contrib` is required since chart v0.110+. The contrib distribution includes the `prometheusremotewrite` exporter. Core distribution does not.
-
-Wait for rollout:
+<Callout type="info">
+`image.repository=otel/opentelemetry-collector-contrib` is required from chart v0.110+. The contrib distribution includes the `prometheusremotewrite` exporter. The core distribution does not.
+</Callout>
 
 ```bash
 kubectl rollout status deployment/otel-collector -n observability --context k3d-otel
 ```
 
-### Step 5 — Deploy the sample app
+</Step>
 
-A minimal load generator that sends OTLP traces and metrics every 10 seconds — no language SDK required, just raw HTTP to the OTLP endpoint:
+<Step number={5} title="Deploy the sample app" time="~2 min">
+
+A minimal load generator that sends all three OTLP signals every 10 seconds — no language SDK required:
 
 ```bash
 kubectl apply --context k3d-otel -f - <<'EOF'
@@ -228,28 +230,28 @@ spec:
                 COUNT=$((COUNT + 1))
                 NOW_NS=$(date +%s)000000000
                 START_NS=$(( $(date +%s) - 1 ))000000000
-                curl -s -X POST http://otel-collector.observability.svc.cluster.local:4318/v1/traces \
+                # Traces
+                curl -sf -X POST http://otel-collector.observability.svc.cluster.local:4318/v1/traces \
                   -H "Content-Type: application/json" \
-                  -d "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"sample-app\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"sample-app-tracer\"},\"spans\":[{\"traceId\":\"0102030405060708090a0b0c0d0e0f10\",\"spanId\":\"010203040506070${COUNT}\",\"name\":\"GET /api/users\",\"kind\":2,\"startTimeUnixNano\":\"${START_NS}\",\"endTimeUnixNano\":\"${NOW_NS}\",\"status\":{\"code\":1}}]}]}]}" || true
-                curl -s -X POST http://otel-collector.observability.svc.cluster.local:4318/v1/metrics \
+                  -d "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"sample-app\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"0102030405060708090a0b0c0d0e0f10\",\"spanId\":\"010203040506070${COUNT}\",\"name\":\"GET /api/users\",\"kind\":2,\"startTimeUnixNano\":\"${START_NS}\",\"endTimeUnixNano\":\"${NOW_NS}\",\"status\":{\"code\":1}}]}]}]}" || true
+                # Metrics
+                curl -sf -X POST http://otel-collector.observability.svc.cluster.local:4318/v1/metrics \
                   -H "Content-Type: application/json" \
-                  -d "{\"resourceMetrics\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"sample-app\"}}]},\"scopeMetrics\":[{\"scope\":{\"name\":\"sample-app-metrics\"},\"metrics\":[{\"name\":\"http_requests_total\",\"sum\":{\"dataPoints\":[{\"attributes\":[{\"key\":\"http.method\",\"value\":{\"stringValue\":\"GET\"}}],\"startTimeUnixNano\":\"${START_NS}\",\"timeUnixNano\":\"${NOW_NS}\",\"asInt\":${COUNT}}],\"aggregationTemporality\":2,\"isMonotonic\":true}}]}]}]}" || true
-                curl -s -X POST http://otel-collector.observability.svc.cluster.local:4318/v1/logs \
+                  -d "{\"resourceMetrics\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"sample-app\"}}]},\"scopeMetrics\":[{\"metrics\":[{\"name\":\"http_requests_total\",\"sum\":{\"dataPoints\":[{\"startTimeUnixNano\":\"${START_NS}\",\"timeUnixNano\":\"${NOW_NS}\",\"asInt\":${COUNT}}],\"aggregationTemporality\":2,\"isMonotonic\":true}}]}]}]}" || true
+                # Logs
+                curl -sf -X POST http://otel-collector.observability.svc.cluster.local:4318/v1/logs \
                   -H "Content-Type: application/json" \
-                  -d "{\"resourceLogs\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"sample-app\"}}]},\"scopeLogs\":[{\"scope\":{\"name\":\"sample-app-logger\"},\"logRecords\":[{\"timeUnixNano\":\"${NOW_NS}\",\"severityText\":\"INFO\",\"body\":{\"stringValue\":\"handled GET /api/users\"},\"attributes\":[{\"key\":\"http.status_code\",\"value\":{\"intValue\":200}}]}]}]}]}" || true
+                  -d "{\"resourceLogs\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"sample-app\"}}]},\"scopeLogs\":[{\"logRecords\":[{\"timeUnixNano\":\"${NOW_NS}\",\"severityText\":\"INFO\",\"body\":{\"stringValue\":\"handled GET /api/users\"}}]}]}]}" || true
                 sleep 10
               done
-          env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otel-collector.observability.svc.cluster.local:4318"
-            - name: OTEL_SERVICE_NAME
-              value: "sample-app"
 EOF
 
 kubectl rollout status deployment/sample-app -n sample-app --context k3d-otel
 ```
 
-### Step 6 — Start port-forwards
+</Step>
+
+<Step number={6} title="Start port-forwards" time="~30 sec">
 
 ```bash
 kubectl port-forward -n observability svc/kube-prometheus-stack-grafana 3000:80 \
@@ -260,35 +262,27 @@ kubectl port-forward -n observability svc/otel-collector 4318:4318 \
   --context k3d-otel &
 ```
 
-> The `&` runs each port-forward in the background of your current shell session. They terminate when you close the terminal. Re-run the commands above in a new session if needed.
+<Callout type="info">
+The `&` runs each port-forward in the background of your current shell. They terminate when you close the terminal — re-run in a new session if needed.
+</Callout>
+
+| UI | URL | Credentials |
+|----|-----|-------------|
+| Grafana | http://localhost:3000 | admin / tinkerwithtech |
+| Prometheus | http://localhost:9090 | — |
+
+</Step>
 
 ---
 
 ## Verification
 
-Run the built-in 11-point health check:
-
 ```bash
 ./setup.sh --verify
+# 11 passed / 0 failed
 ```
 
-All 11 checks should pass:
-
-```
-✔ k3d cluster 'otel' exists
-✔ kubectl context k3d-otel accessible
-✔ Namespace observability exists
-✔ Namespace sample-app exists
-✔ OTel Collector deployment running
-✔ OTel Collector pod ready
-✔ Prometheus deployment running
-✔ Grafana deployment running
-✔ Grafana pod ready
-✔ Sample-app deployment running
-✔ Sample-app pod ready
-```
-
-### The HERO MOMENT — Three Signals, One Process
+**Watch all three signals flow through the Collector:**
 
 ```bash
 kubectl logs -n observability \
@@ -296,26 +290,25 @@ kubectl logs -n observability \
   --context k3d-otel --tail=50
 ```
 
-You'll see all three signals flowing through the debug exporter:
-
+<ExpectedOutput>
 ```
 info  Traces  {"otelcol.signal": "traces", "resource spans": 1, "spans": 1}
      -> service.name: Str(sample-app)
-ScopeSpans #0 InstrumentationScope sample-app-tracer 1.0.0
-Span #0  Name: GET /api/users
+     Span #0  Name: GET /api/users
 
-info  Metrics  {"otelcol.signal": "metrics", "resource metrics": 2, "metrics": 1}
+info  Metrics  {"otelcol.signal": "metrics", "resource metrics": 1, "metrics": 1}
      -> service.name: Str(sample-app)
-InstrumentationScope sample-app-metrics
-Metric #0 Name: http_requests_total
+     Metric #0  Name: http_requests_total
 
 info  Logs  {"otelcol.signal": "logs", "resource logs": 1, "log records": 1}
      -> service.name: Str(sample-app)
-InstrumentationScope sample-app-logger
-LogRecord #0  Body: handled GET /api/users
+     Body: handled GET /api/users
 ```
+</ExpectedOutput>
 
+<Callout type="success">
 Traces received from the OTLP receiver. Metrics batched and forwarded to Prometheus via remote write. Logs flowing through the pipeline. **Three signals. One process. One config file.**
+</Callout>
 
 ---
 
@@ -324,26 +317,22 @@ Traces received from the OTLP receiver. Metrics batched and forwarded to Prometh
 ```
 k3d cluster: otel
 └── observability/
-    ├── otel-collector          ← Central signal bus (OTLP in, debug + promremote out)
-    ├── prometheus              ← Stores metrics (remote-write receiver enabled)
-    └── grafana                 ← Visualises Prometheus metrics
+    ├── otel-collector     ← Central signal bus (OTLP in → debug + promremote out)
+    ├── prometheus         ← Stores metrics (remote-write receiver enabled)
+    └── grafana            ← Visualises Prometheus metrics
 
 sample-app/
-└── sample-app                  ← curl container; sends OTLP traces + metrics every 10s
-
-Dashboards:
-  Grafana:     http://localhost:3000  (admin / tinkerwithtech)
-  Prometheus:  http://localhost:9090
+└── sample-app             ← curl container; sends OTLP traces + metrics + logs every 10s
 ```
 
-**Key architectural facts to remember:**
+**Key facts to remember:**
 
 | Concept | Detail |
 |---------|--------|
-| OTLP | The standard wire protocol for all three signals — replace any backend without app changes |
-| OTel Collector | Stateless, scalable — runs as DaemonSet for logs, Deployment for traces/metrics |
-| `image.repository` | Must be `otel/opentelemetry-collector-contrib` for `prometheusremotewrite` exporter |
-| Remote-write receiver | Must enable on Prometheus: `--web.enable-remote-write-receiver` (or Helm flag) |
-| OTel activity | #2 most active CNCF project — SDK support spans 11+ languages |
+| OTLP | Standard wire protocol for all three signals — swap any backend without touching app code |
+| OTel Collector | Stateless, scalable — run as DaemonSet for logs, Deployment for traces/metrics |
+| `collector-contrib` image | Required for `prometheusremotewrite` exporter — core image lacks it |
+| Remote-write receiver | Must enable on Prometheus: `--web.enable-remote-write-receiver` or the Helm flag above |
+| CNCF momentum | #2 most active CNCF project — SDK support spans 11+ languages |
 
-Full setup script, manifests, and demo walkthrough: [github.com/chruzie/tinkerwithtech](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep04-opentelemetry)
+Full source: [github.com/chruzie/tinkerwithtech/tree/main/season1/ep04-opentelemetry](https://github.com/chruzie/tinkerwithtech/tree/main/season1/ep04-opentelemetry)
