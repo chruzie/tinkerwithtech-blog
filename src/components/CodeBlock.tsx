@@ -105,7 +105,7 @@ export function CodeBlock({ children, className }: CodeBlockProps) {
             </button>
 
             <div className="p-5 overflow-x-auto">
-                <pre className={`language-${language} m-0 p-0 bg-transparent text-sm leading-relaxed`}>
+                <pre className={`language-${language} m-0 p-0 bg-transparent text-sm leading-relaxed`} suppressHydrationWarning>
                     <code
                         className="font-mono text-[#cdd6f4]"
                         dangerouslySetInnerHTML={{ __html: htmlResult }}
