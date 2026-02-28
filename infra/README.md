@@ -1,23 +1,37 @@
 # Infrastructure — TinkerWithTech Blog
 
-Static Next.js site deployed to Google Cloud Storage on every push to `main`.
+Two GitHub repos write to one GCS bucket. The GitHub repos stay private.
 
 ```
-GitHub repo (main)
-      │
-      │  push
-      ▼
-GitHub Actions (.github/workflows/deploy.yml)
-      │
-      │  npm run build  →  out/
-      │
-      │  google-github-actions/auth (Workload Identity — keyless)
-      │
-      │  google-github-actions/upload-cloud-storage
-      ▼
-GCS Bucket (blog.tinkerwithtech.io)
-      │
-      │  static website hosting
+chruzie/tinkerwithtech (private)        chruzie/tinkerwithtech-blog (private)
+  season1/*/setup.sh                      Next.js static site
+       │                                          │
+       │  push to main                            │  push to main
+       ▼                                          ▼
+  publish-scripts.yml                       deploy.yml
+       │                                          │
+       │  upload season1/*/setup.sh               │  npm run build → out/
+       ▼                                          ▼
+       └──────────────────┬───────────────────────┘
+                          │  Workload Identity (keyless)
+                          ▼
+              GCS Bucket (blog.tinkerwithtech.io)
+                ├── /                 ← Next.js static site
+                └── /scripts/
+                    ├── ep01-argocd-agent/setup.sh
+                    ├── ep02-kubernetes-operators/setup.sh
+                    └── ...
+                          │
+                          │  public read
+                          ▼
+              https://blog.tinkerwithtech.io
+```
+
+Users download scripts directly from the bucket — no GitHub access required:
+```bash
+curl -fsSL https://blog.tinkerwithtech.io/scripts/ep01-argocd-agent/setup.sh -o setup.sh
+chmod +x setup.sh
+```
       ▼
 https://blog.tinkerwithtech.io
 ```
@@ -155,13 +169,20 @@ For HTTPS on a custom domain, add a GCP Load Balancer or proxy through Cloudflar
 
 ## GitHub secrets and variables
 
-Go to: `github.com/chruzie/tinkerwithtech-blog → Settings → Secrets and variables → Actions`
+Both repos use the same service account and WIF provider. Set these identically in each.
+
+**`github.com/chruzie/tinkerwithtech-blog → Settings → Secrets and variables → Actions`**
+**`github.com/chruzie/tinkerwithtech → Settings → Secrets and variables → Actions`**
 
 | Type | Name | Value |
 |------|------|-------|
 | Secret | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/49439141503/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
 | Secret | `GCP_SERVICE_ACCOUNT` | `github-deploy@tinkerwithtech-214914.iam.gserviceaccount.com` |
 | Variable | `GCS_BUCKET_NAME` | `blog.tinkerwithtech.io` |
+
+The WIF provider `attribute-condition` was updated to allow both repos:
+- `chruzie/tinkerwithtech-blog` — deploys the site
+- `chruzie/tinkerwithtech` — deploys setup scripts to `/scripts/`
 
 ---
 

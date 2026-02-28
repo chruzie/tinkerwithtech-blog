@@ -32,11 +32,10 @@ You'll need the following tools installed and on your PATH before running the se
 | `argocd-agentctl` | argocd-agent management CLI | [argoproj-labs releases](https://github.com/argoproj-labs/argocd-agent/releases) |
 | Docker | Required by k3d | [docker.com](https://www.docker.com) |
 
-The setup script also requires `helm` for installing Argo CD. Clone the episode repo and you're ready:
+The setup script also requires `helm` for installing Argo CD. Download the setup script and you're ready:
 
 ```bash
-git clone https://github.com/chruzie/tinkerwithtech.git
-cd tinkerwithtech/season1/ep01-argocd-agent
+curl -fsSL https://blog.tinkerwithtech.io/scripts/ep01-argocd-agent/setup.sh -o setup.sh
 chmod +x setup.sh
 ```
 
