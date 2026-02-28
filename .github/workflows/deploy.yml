@@ -30,6 +30,7 @@ jobs:
 
       - name: Build static site
         run: npm run build
+        # Outputs to: out/
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -37,11 +38,37 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-      - name: Upload to GCS bucket
+      # HTML pages — no-cache so new deploys are reflected immediately
+      - name: Upload HTML pages
         uses: google-github-actions/upload-cloud-storage@v2
         with:
           path: out
           destination: ${{ vars.GCS_BUCKET_NAME }}
           parent: false
+          glob: "**/*.html"
+          headers: |-
+            cache-control: no-cache, must-revalidate
+            content-type: text/html; charset=utf-8
+
+      # Hashed static assets (_next/static/) — immutable, 1 year TTL
+      # Next.js content-hashes these filenames so stale cache is never an issue
+      - name: Upload hashed static assets
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: out
+          destination: ${{ vars.GCS_BUCKET_NAME }}
+          parent: false
+          glob: "_next/static/**"
+          headers: |-
+            cache-control: public, max-age=31536000, immutable
+
+      # Everything else (fonts, images, favicon, etc.) — 1 hour TTL
+      - name: Upload other assets
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: out
+          destination: ${{ vars.GCS_BUCKET_NAME }}
+          parent: false
+          glob: "**/*.!(html)"
           headers: |-
             cache-control: public, max-age=3600
