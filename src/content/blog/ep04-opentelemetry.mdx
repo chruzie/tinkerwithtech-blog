@@ -32,7 +32,8 @@ No language SDK, no cloud credentials — everything runs inside the cluster.
 
 ## Architecture
 
-<Diagram content={`Your App (any language)
+```diagram
+Your App (any language)
    │  OTLP gRPC :4317 or HTTP :4318
    ▼
 ┌─────────────────────────────────────────┐
@@ -53,7 +54,8 @@ No language SDK, no cloud credentials — everything runs inside the cluster.
       Prometheus            Collector stdout
           │                  (traces + logs)
           ▼
-        Grafana`} />
+        Grafana
+```
 
 The Collector is the **central bus**. It decouples your application instrumentation from your observability backends. Swap Jaeger in for traces, Loki for logs — without changing a single line of application code.
 
@@ -341,5 +343,20 @@ sample-app/
 | `collector-contrib` image | Required for `prometheusremotewrite` exporter — core image lacks it |
 | Remote-write receiver | Must enable on Prometheus: `--web.enable-remote-write-receiver` or the Helm flag above |
 | CNCF momentum | #2 most active CNCF project — SDK support spans 11+ languages |
+
+## Teardown
+
+When you're done experimenting, clean up everything:
+
+```bash
+# Stop any port-forwards
+pkill -f "port-forward.*prometheus" 2>/dev/null
+pkill -f "port-forward.*grafana" 2>/dev/null
+
+# Delete the cluster
+k3d cluster delete otel
+```
+
+---
 
 Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)

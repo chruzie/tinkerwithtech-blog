@@ -34,7 +34,8 @@ The demo uses the **Crossplane NOP provider** (no-op — behaves exactly like a 
 
 ### The Terraform model — pipeline
 
-<Diagram content={`Developer ──(HCL file)──► terraform apply ──(API call)──► Cloud Resource Created
+```diagram
+Developer ──(HCL file)──► terraform apply ──(API call)──► Cloud Resource Created
                           (manual trigger)                         │
                                                           state stored
                                                                    │
@@ -43,13 +44,15 @@ The demo uses the **Crossplane NOP provider** (no-op — behaves exactly like a 
                                                drift invisible until next plan
                                                                    ▼
                                                       ⚠ Config drift — nobody notices
-                                                      (hours or days before detection)`} />
+                                                      (hours or days before detection)
+```
 
 Terraform is a **pipeline tool**. You invoke it, it provisions, it stores state, then it waits until you run it again. Drift is invisible until the next `terraform plan`. In a busy team, that gap can be hours or days.
 
 ### The Crossplane model — control plane
 
-<Diagram content={`Developer
+```diagram
+Developer
    │  kubectl apply YAML CR
    ▼
 Kubernetes API Server
@@ -65,13 +68,14 @@ Resource: Ready + Synced ──────────────────�
    │
    │  drift detected?
    ▼
-Auto-correct in milliseconds`} />
+Auto-correct in milliseconds
+```
 
 Crossplane runs a **Kubernetes controller** inside your cluster. It watches Custom Resource objects and continuously reconciles the real world to match them. Drift is not a scheduled event — it's detected and corrected in the same reconciliation loop that fires on every watch event.
 
 ---
 
-## Setup
+## Step-by-step
 
 <Step number={1} title="Create the k3d cluster" time="~1 min">
 
@@ -330,5 +334,18 @@ Back in 8 seconds. No human intervention. That's the control-plane model.
 | Platform team + GitOps + Kubernetes-native | **Both** |
 
 The most common production pattern: **Terraform provisions the Kubernetes cluster. Crossplane runs inside it and provisions everything else.** They're complementary layers, not competitors.
+
+## Teardown
+
+When you're done experimenting, clean up everything:
+
+```bash
+k3d cluster delete crossplane
+rm -rf /tmp/ep03-terraform-demo
+```
+
+This removes the k3d cluster and the temporary Terraform state directory.
+
+---
 
 Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)

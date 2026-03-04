@@ -22,6 +22,7 @@ interface CodeBlockProps {
 const DIAGRAM_CHARS = /[┌┐└┘├┤┬┴┼─│╔╗╚╝╠╣╦╩╬═║▼▶←→↑↓◀▸■□►◄▲●○◆]/;
 
 function isDiagram(code: string, language: string): boolean {
+    if (language === "diagram" || language === "ascii") return true;
     // Only treat unlabeled or explicit "text" blocks as potential diagrams
     if (language && language !== "text") return false;
     return DIAGRAM_CHARS.test(code);

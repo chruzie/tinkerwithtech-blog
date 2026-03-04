@@ -1,115 +1,22 @@
 ---
 title: "Multi-Cluster GitOps Without the Pain: argocd-agent on Your Homelab"
-date: "2026-02-22"
+date: "2026-03-03"
 description: "argocd-agent flips the Argo CD hub-spoke model on its head — agents dial OUT from workload clusters, eliminating stored credentials and exposed API servers. Full homelab setup with k3d and vCluster."
 season: 1
 episode: 1
 tags: ["argocd", "kubernetes", "gitops", "mtls", "vcluster", "k3d"]
+published: true
 ---
 
-import { Tabs, Tab } from '@/components/Tabs'
 import { Callout } from '@/components/Callout'
 import { Step } from '@/components/Step'
 import { ExpectedOutput } from '@/components/ExpectedOutput'
 
-# Multi-Cluster GitOps Without the Pain
+Traditional Argo CD multi-cluster setups store kubeconfig credentials on the hub and reach into every cluster. Fifty clusters means fifty attack surfaces.
 
-Traditional Argo CD multi-cluster setups have the control plane reaching out to every cluster it manages. Open firewall rules, exposed API servers, stored kubeconfig credentials for each workload cluster. Fifty clusters means fifty attack surfaces baked into your control plane.
+argocd-agent inverts this. Workload clusters run lightweight agents that dial *out* to a principal on the hub over gRPC with mutual TLS. No stored kubeconfigs, no inbound firewall rules, no exposed API servers.
 
-argocd-agent inverts this. Workload clusters run lightweight agents that dial out to a principal on the hub over gRPC with mutual TLS. The control plane never touches clusters directly.
-
-This post walks through a homelab setup: k3d hub cluster, two vClusters as workload targets, PKI bootstrapping, and a live GitOps sync. One script, about 30 minutes, tear it down when done.
-
----
-
-## Requirements
-
-<div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-6">
-  <div className="rounded-lg border border-foreground/10 bg-foreground/5 p-4">
-    <div className="text-2xl mb-2">⏰</div>
-    <div className="font-semibold">Time</div>
-    <div className="text-sm text-foreground/70">15-30 minutes</div>
-  </div>
-  <div className="rounded-lg border border-foreground/10 bg-foreground/5 p-4">
-    <div className="text-2xl mb-2">💾</div>
-    <div className="font-semibold">Disk</div>
-    <div className="text-sm text-foreground/70">~5GB (Docker images)</div>
-  </div>
-  <div className="rounded-lg border border-foreground/10 bg-foreground/5 p-4">
-    <div className="text-2xl mb-2">🐏</div>
-    <div className="font-semibold">RAM</div>
-    <div className="text-sm text-foreground/70">~4GB (3 clusters)</div>
-  </div>
-</div>
-
----
-
-## Two Ways In
-
-<Tabs>
-<Tab label="⚡ Quick Start">
-One command, see it work:
-
-```bash
-curl -fsSL https://blog.tinkerwithtech.io/scripts/ep01-argocd-agent/setup.sh -o setup.sh
-chmod +x setup.sh
-./setup.sh
-```
-
-Skip to [Verification](#verification) for what to check.
-</Tab>
-
-<Tab label="📚 Manual">
-Step through each component below. Takes longer, but you'll understand what each piece does.
-</Tab>
-</Tabs>
-
----
-
-## What argocd-agent Changes
-
-Traditional Argo CD stores kubeconfig secrets on the hub and reaches into each cluster's API. argocd-agent reverses the flow: agents on workload clusters connect outbound to the hub.
-
-Result: no kubeconfig secrets stored centrally, no inbound firewall rules needed on workload clusters, mutual TLS for authentication instead of bearer tokens.
-
----
-
-## Good Fit / Bad Fit
-
-<div className="grid grid-cols-1 md:grid-cols-2 gap-6 my-6">
-  <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
-    <div className="font-semibold text-green-400 mb-2">Use This</div>
-    <ul className="text-sm space-y-1">
-      <li>• Multi-tenant platforms with untrusted workloads</li>
-      <li>• Edge/IoT behind NAT or firewalls</li>
-      <li>• Air-gapped environments</li>
-      <li>• 10+ clusters where kubeconfig rotation hurts</li>
-    </ul>
-  </div>
-  <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4">
-    <div className="font-semibold text-red-400 mb-2">Skip This</div>
-    <ul className="text-sm space-y-1">
-      <li>• Single cluster setups</li>
-      <li>• Trusted VPCs where complexity isn't warranted</li>
-      <li>• Teams without PKI expertise</li>
-      <li>• Quick prototypes</li>
-    </ul>
-  </div>
-</div>
-
----
-
-## Comparison
-
-| | Traditional | argocd-agent |
-|---|---|---|
-| Firewall rules | Inbound to all clusters | Egress-only |
-| Secrets on hub | N kubeconfigs | None |
-| Network exposure | Full API access | gRPC tunnel |
-| Onboarding | Kubeconfig exchange | Agent install |
-| Complexity | Lower | Higher |
-
-Trade-off: more moving parts, but better security posture for untrusted or hard-to-reach clusters.
+This post walks through a homelab setup: k3d hub, two vClusters as workloads, PKI bootstrapping, and a live GitOps sync.
 
 ---
 
@@ -141,9 +48,10 @@ chmod +x argocd-agentctl && sudo mv argocd-agentctl /usr/local/bin/
 
 ## Architecture
 
-Traditional Argo CD stores kubeconfig secrets on the hub. The application-controller pushes manifests outward. Every workload cluster exposes its API server.
+### Traditional Argo CD
 
-<Diagram content={`┌─────────────────────────────────────────────────────┐
+```diagram
+┌─────────────────────────────────────────────────────┐
 │              Hub Cluster (Argo CD)                  │
 │                                                     │
 │  argocd-server   application-controller             │
@@ -152,11 +60,13 @@ Traditional Argo CD stores kubeconfig secrets on the hub. The application-contro
 │  kubeconfig-workload-2 🔑 ──────────────────────►  │──► Workload-2  ⚠ API exposed
 │  kubeconfig-workload-N 🔑 ──────────────────────►  │──► Workload-N  ⚠ API exposed
 │                         outbound push               │
-└─────────────────────────────────────────────────────┘`} />
+└─────────────────────────────────────────────────────┘
+```
 
-argocd-agent reverses the direction. Agents dial out to the principal on the hub over gRPC + mTLS. The hub stores no kubeconfig secrets and makes no inbound connections.
+### With argocd-agent
 
-<Diagram content={`┌──────────────────────────────┐     ┌──────────────────────────────────┐
+```diagram
+┌──────────────────────────────┐     ┌──────────────────────────────────┐
 │         Workload-1           │     │         Hub Cluster              │
 │                              │     │                                  │
 │  argocd-agent                │     │  argocd-agent-principal          │
@@ -170,13 +80,14 @@ argocd-agent reverses the direction. Agents dial out to the principal on the hub
 │  argocd-agent                │──────────────┘  gRPC + mTLS
 │  application-controller      │                 agents dial OUT
 │  ✔ egress-only               │
-└──────────────────────────────┘`} />
+└──────────────────────────────┘
+```
 
-Workload clusters need zero inbound firewall rules. Outbound port 8443 suffices. No kubeconfig secrets on the hub means nothing to rotate or leak. Each agent authenticates with a unique mTLS client certificate issued by your CA.
+Agents dial out over gRPC + mTLS. Zero inbound firewall rules. No kubeconfig secrets to rotate or leak.
 
 ---
 
-## Setup
+## Step-by-step
 
 <Step number={1} title="Hub Cluster" time="~2 min">
 
@@ -243,6 +154,14 @@ export KUBECONFIG="${HOME}/.kube/config:/tmp/vc-workload-1.yaml:/tmp/vc-workload
 kubectl config view --flatten > /tmp/merged.yaml
 mv /tmp/merged.yaml "${HOME}/.kube/config"
 unset KUBECONFIG
+
+# vCluster auto-generates long context names — rename them
+kubectl config rename-context \
+  "vcluster_workload-1_vcluster-workload-1_k3d-hub" \
+  "vcluster-workload-1" 2>/dev/null || true
+kubectl config rename-context \
+  "vcluster_workload-2_vcluster-workload-2_k3d-hub" \
+  "vcluster-workload-2" 2>/dev/null || true
 ```
 
 Verify contexts:
@@ -260,8 +179,8 @@ CURRENT   NAME                  CLUSTER               AUTHINFO              NAME
 ```
 </ExpectedOutput>
 
-<Callout type="warning">
-vCluster may show deprecation warnings for `--update-current`, `--kube-config-context-name`, `--kube-config`. Safe to ignore. Using `--print`.
+<Callout type="tip">
+Complete Steps 2–5 in one shell session. The vCluster kubeconfig ports are ephemeral — if your shell restarts, re-run the `vcluster connect --print` commands and re-merge before continuing.
 </Callout>
 
 </Step>
@@ -483,8 +402,6 @@ EOF
 done
 ```
 
-The `argocd.argoproj.io/secret-type: cluster` label registers the workload. The `server` URL points to the resource proxy, a sidecar that translates Argo CD's cluster API calls into agent-routed gRPC messages.
-
 <Callout type="check">
 Check: `kubectl get secret -n argocd --context k3d-hub | grep cluster-`
 - cluster-workload-1
@@ -560,7 +477,7 @@ kubectl create namespace workload-2 --context k3d-hub 2>/dev/null || true
 
 <ExpectedOutput>
 ```
-Principal reachable at: 172.18.0.4:32314
+Principal reachable at: 172.18.0.4:32314   # port varies per run
 statefulset "argocd-application-controller" successfully rolled out
 deployment "argocd-agent-agent" successfully rolled out
 statefulset "argocd-application-controller" successfully rolled out
@@ -640,13 +557,9 @@ level=info msg="Updated cluster cache stats in cluster." agent=workload-2 applic
 ```
 </ExpectedOutput>
 
-Agent shows `Connected to argocd-agent`. Principal shows `agent=workload-1` and `agent=workload-2`.
-
 ---
 
 ### Deploy Test Application
-
-Apply an Application manifest on the hub. The agent relays via gRPC; the workload's app-controller applies locally.
 
 ```yaml
 # manifests/demo-app.yaml
@@ -698,68 +611,6 @@ Application CR lives on the hub in `workload-1` namespace. Pods run on vcluster-
 
 ---
 
-## Troubleshooting
-
-### Agents Won't Connect (TLS Errors)
-
-**Symptoms:**
-```
-level=error msg="Failed to connect" error="tls: failed to verify certificate..."
-```
-
-**Fix:**
-```bash
-# Re-issue principal cert
-PRINCIPAL_IP=$(kubectl get svc argocd-agent-principal -n argocd --context k3d-hub -o jsonpath='{.spec.clusterIP}')
-NODE_IP=$(kubectl get nodes --context k3d-hub -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-
-argocd-agentctl pki issue principal \
-  --principal-context k3d-hub \
-  --ip "${PRINCIPAL_IP}" \
-  --ip "${NODE_IP}" \
-  --dns "argocd-agent-principal.argocd.svc.cluster.local" \
-  --upsert
-
-# Restart principal
-kubectl rollout restart deployment/argocd-agent-principal -n argocd --context k3d-hub
-kubectl rollout status deployment/argocd-agent-principal -n argocd --context k3d-hub --timeout=300s
-
-sleep 30
-```
-
-### Application Stuck "Unknown"
-
-**Diagnosis:**
-
-```bash
-# Check agent connected
-kubectl logs deployment/argocd-agent-principal -n argocd --context k3d-hub | grep "agent=workload-1"
-
-# Check namespace routing
-kubectl get configmap argocd-agent-params -n argocd --context k3d-hub -o yaml | grep allowed-namespaces
-# Should show: workload-1,workload-2
-
-# Check cluster secret exists
-kubectl get secret cluster-workload-1 -n argocd --context k3d-hub
-```
-
-### `dial tcp` Connection Errors
-
-You may see:
-```
-dial tcp 10.43.x.x:443: connect: connection refused
-```
-
-Expected during setup. vCluster API server briefly rejects connections while initializing. Agent retries automatically; errors stop within 30-60 seconds.
-
-### Port 8443 in Use
-
-```bash
-pkill -f "port-forward.*argocd-server.*8443"
-```
-
----
-
 ## Teardown
 
 ```bash
@@ -788,32 +639,17 @@ rm -f /tmp/argocd-admin-password.txt /tmp/argocd-port-forward.log /tmp/vc-*.yaml
 echo "Cleanup complete!"
 ```
 
-Or use the script:
-```bash
-./setup.sh --teardown
-```
+Or use the script: `./setup.sh --teardown`
 
 ---
 
 ## What You Built
 
-A working argocd-agent environment where:
-
-- Workload clusters initiate all connections. Zero inbound access.
-- mTLS mutual authentication replaces stored kubeconfig credentials.
-- App-controllers run on workload clusters. Reconciliation at the edge.
-- The hub is purely a control plane. It defines applications; agents deliver them.
-
-This scales to hundreds of workload clusters without adding attack surface to your hub. Works in air-gapped environments and behind NAT where traditional Argo CD needs VPN tunnels or jump hosts.
+- Workload clusters initiate all connections — zero inbound access
+- mTLS replaces stored kubeconfig credentials
+- App-controllers run on workload clusters — reconciliation at the edge
+- Hub is purely a control plane — defines applications, agents deliver them
 
 ---
 
-## Next Steps
-
-- YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)
-- CNCF Slack: [#argo](https://cloud-native.slack.com/archives/C01TSKR0K4R)
-- argocd-agent docs: [argoproj-labs/argocd-agent](https://github.com/argoproj-labs/argocd-agent)
-
----
-
-*Last updated: February 2026 | argocd-agent: 0.5.3 | Argo CD: v3.x*
+Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)
