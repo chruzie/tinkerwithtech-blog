@@ -46,6 +46,21 @@ export default function RootLayout({
             &copy; {new Date().getFullYear()} TinkerWithTech. All rights reserved.
           </footer>
         </div>
+        {/* Google Analytics */}
+        <Script
+          src="https://www.googletagmanager.com/gtag/js?id=G-682PK1GE2T"
+          strategy="afterInteractive"
+        />
+        <Script id="google-analytics" strategy="afterInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'G-682PK1GE2T');
+          `}
+        </Script>
+
+        {/* Ko-fi Widget */}
         <Script
           src="https://storage.ko-fi.com/cdn/widget/Widget_2.js"
           strategy="afterInteractive"
