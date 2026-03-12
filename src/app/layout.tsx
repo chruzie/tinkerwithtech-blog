@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from 'next/link';
+import Script from 'next/script';
 import "./globals.css";
 
 const geistSans = Geist({
@@ -45,6 +46,14 @@ export default function RootLayout({
             &copy; {new Date().getFullYear()} TinkerWithTech. All rights reserved.
           </footer>
         </div>
+        <Script
+          src="https://storage.ko-fi.com/cdn/widget/Widget_2.js"
+          strategy="afterInteractive"
+        />
+        <Script id="kofi-widget" strategy="afterInteractive">
+          {`kofiwidget2.init('Support me on Ko-fi', '#ff6501', 'Y8Y51KQK8E');
+          kofiwidget2.draw();`}
+        </Script>
       </body>
     </html>
   );

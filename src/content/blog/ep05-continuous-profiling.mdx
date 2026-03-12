@@ -64,8 +64,16 @@ k3d cluster: ep05-profiling
 | `kubectl` | `brew install kubectl` |
 | `k3d` | `brew install k3d` |
 | `helm` | `brew install helm` |
+| `docker` | [docker.com/get-started](https://www.docker.com/get-started) |
 
 No Go SDK. No language changes. No cloud credentials.
+
+Clone the setup script to follow along:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chruzie/tinkerwithtech/main/season1/ep05-continuous-profiling/setup.sh \
+  -o setup.sh && chmod +x setup.sh
+```
 
 <Callout type="info">
 Parca Agent requires Linux kernel 5.8+ for eBPF CO-RE support. On macOS, k3d uses a Linux VM (via Lima or Virtualization.framework) — kernel requirement is automatically satisfied.
@@ -73,31 +81,25 @@ Parca Agent requires Linux kernel 5.8+ for eBPF CO-RE support. On macOS, k3d use
 
 ---
 
-## Setup
+## Step-by-step
 
-<Step number="1" title="Create the k3d cluster" time="~1 min">
+### 1. Create the k3d cluster
 
 ```bash
 k3d cluster create ep05-profiling --agents 1 --wait \
   --k3s-arg "--disable=traefik@server:0"
 ```
 
-<Callout type="check">
-`kubectl cluster-info --context k3d-ep05-profiling` returns without error.
-</Callout>
+`kubectl cluster-info --context k3d-ep05-profiling` should return without error.
 
-</Step>
-
-<Step number="2" title="Create namespaces" time="~30 sec">
+### 2. Create namespaces
 
 ```bash
 kubectl create namespace parca --context k3d-ep05-profiling
 kubectl create namespace sample-app --context k3d-ep05-profiling
 ```
 
-</Step>
-
-<Step number="3" title="Install Parca Server" time="~3 min">
+### 3. Install Parca Server
 
 ```bash
 helm repo add parca https://charts.parca.dev
@@ -114,13 +116,9 @@ helm install parca parca/parca \
 kubectl rollout status deployment/parca -n parca --context k3d-ep05-profiling
 ```
 
-<Callout type="check">
-`kubectl get pods -n parca --context k3d-ep05-profiling` shows `parca-*` pod in Running state.
-</Callout>
+`kubectl get pods -n parca --context k3d-ep05-profiling` should show `parca-*` in Running state.
 
-</Step>
-
-<Step number="4" title="Install Parca Agent" time="~2 min">
+### 4. Install Parca Agent
 
 ```bash
 helm install parca-agent parca/parca-agent \
@@ -133,24 +131,18 @@ helm install parca-agent parca/parca-agent \
   --timeout=300s
 ```
 
-<Callout type="info">
-The agent runs as a **DaemonSet** — one pod per node. On a single-node k3d cluster, one agent pod profiles every container on the machine.
-</Callout>
+The agent runs as a DaemonSet — one pod per node. On a single-node k3d cluster, one agent pod profiles every container on the machine.
 
 ```bash
 kubectl get daemonset parca-agent -n parca --context k3d-ep05-profiling
 ```
 
-<ExpectedOutput>
 ```
 NAME          DESIRED   CURRENT   READY   NODE SELECTOR
 parca-agent   1         1         1       <none>
 ```
-</ExpectedOutput>
 
-</Step>
-
-<Step number="5" title="Deploy the CPU-bound sample app" time="~1 min">
+### 5. Deploy the CPU-bound sample app
 
 ```bash
 kubectl apply --context k3d-ep05-profiling -f - <<'EOF'
@@ -200,22 +192,14 @@ EOF
 kubectl rollout status deployment/sample-app -n sample-app --context k3d-ep05-profiling
 ```
 
-</Step>
-
-<Step number="6" title="Start port-forward and open Parca UI" time="~30 sec">
+### 6. Start port-forward and open Parca UI
 
 ```bash
 kubectl port-forward svc/parca 7070:7070 -n parca \
   --context k3d-ep05-profiling &
 ```
 
-Open **http://localhost:7070** in your browser.
-
-<Callout type="info">
-Profile data takes 30–60 seconds to appear after the agent starts. If the label selector is empty, wait a moment and refresh.
-</Callout>
-
-</Step>
+Open **http://localhost:7070** in your browser. Profile data takes 30–60 seconds to appear after the agent starts. If the label selector is empty, wait a moment and refresh.
 
 ---
 
@@ -250,9 +234,9 @@ eBPF program loaded. Processes discovered via cgroup hierarchy. Profiles uploadi
 
 ---
 
-## Reading the Flame Graph
+## The Flame Graph (Hero Moment)
 
-In the Parca UI at http://localhost:7070:
+Open the Parca UI at http://localhost:7070:
 
 1. **Select a label** from the dropdown — choose `{namespace="sample-app"}` or `{pod="sample-app-*"}`
 2. **Choose a time range** — the last 5 minutes will show live data
@@ -318,6 +302,15 @@ pkill -f "port-forward.*parca" 2>/dev/null
 
 # Delete the cluster
 k3d cluster delete ep05-profiling
+
+# Remove kubeconfig context
+kubectl config delete-context k3d-ep05-profiling 2>/dev/null || true
+```
+
+Or run the full teardown via the setup script:
+
+```bash
+./setup.sh --teardown
 ```
 
 ---
