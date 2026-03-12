@@ -1,18 +1,22 @@
 import React from 'react'
 
 interface StepProps {
-  number: number
+  number: number | string
   title: string
   time?: string
   children: React.ReactNode
 }
 
 export function Step({ number, title, time, children }: StepProps) {
+  const num = Number(number);
+  const label = number != null && !isNaN(num)
+    ? String(number).includes('.') ? String(number) : String(number).padStart(2, '0')
+    : '??'
   return (
     <div className="my-10">
       <div className="flex items-baseline gap-3 mb-4">
         <span className="font-mono text-xs text-accent bg-accent/10 border border-accent/20 px-2 py-0.5 rounded shrink-0">
-          {String(number).padStart(2, '0')}
+          {label}
         </span>
         <h3 className="text-lg font-semibold text-secondary">{title}</h3>
         {time && (

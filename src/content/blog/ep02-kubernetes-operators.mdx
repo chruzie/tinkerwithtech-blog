@@ -85,9 +85,9 @@ spec.image: nginx:alpine           │ watch event
 
 ---
 
-## Setup
+## Step-by-step
 
-<Step number={1} title="Create the k3d cluster" time="~1 min">
+<Step number="1" title="Create the k3d cluster" time="~1 min">
 
 ```bash
 k3d cluster create operators --agents 1 --wait \
@@ -107,7 +107,7 @@ INFO[0020] Cluster 'operators' created successfully!
 
 </Step>
 
-<Step number={2} title="Scaffold the operator project" time="~2 min">
+<Step number="2" title="Scaffold the operator project" time="~2 min">
 
 ```bash
 mkdir -p /tmp/ep02-webapp-operator && cd /tmp/ep02-webapp-operator
@@ -140,7 +140,7 @@ This generates:
 
 </Step>
 
-<Step number={3} title="Define the WebAppSpec" time="~1 min">
+<Step number="3" title="Define the WebAppSpec" time="~1 min">
 
 Replace the spec structs in `api/v1alpha1/webapp_types.go`:
 
@@ -166,7 +166,7 @@ The `+kubebuilder:` comments become JSON Schema validators in the generated CRD.
 
 </Step>
 
-<Step number={4} title="Write the reconciler" time="~3 min">
+<Step number="4" title="Write the reconciler" time="~3 min">
 
 Replace the entire contents of `internal/controller/webapp_controller.go` with:
 
@@ -288,7 +288,7 @@ Three things to notice:
 
 </Step>
 
-<Step number={5} title="Build and load the image" time="~3 min">
+<Step number="5" title="Build and load the image" time="~3 min">
 
 ```bash
 cd /tmp/ep02-webapp-operator
@@ -305,9 +305,11 @@ Use a non-`:latest` tag. With `:latest`, Kubernetes sets `imagePullPolicy: Alway
 
 </Step>
 
-<Step number={6} title="Deploy the operator and apply a CR" time="~2 min">
+<Step number="6" title="Deploy the operator and apply a CR" time="~2 min">
 
 ```bash
+kubectl config use-context k3d-operators
+
 make install                            # Install the CRD
 make deploy IMG="webapp-operator:dev"   # Deploy controller + RBAC
 
@@ -315,6 +317,10 @@ kubectl rollout status \
   deployment/ep02-webapp-operator-controller-manager \
   -n ep02-webapp-operator-system --context k3d-operators
 ```
+
+<Callout type="warning">
+`make install` and `make deploy` apply to whichever cluster is your current kubectl context. If you have other clusters active (e.g. from a previous episode), run `kubectl config use-context k3d-operators` first. The `k3d cluster create` command adds the context but may not set it as current if your kubeconfig wasn't previously merged.
+</Callout>
 
 ```bash
 kubectl create namespace webapp-demo --context k3d-operators
@@ -352,9 +358,9 @@ kubectl logs -n ep02-webapp-operator-system \
 
 <ExpectedOutput>
 ```
-INFO  Reconciling WebApp  {"controller": "webapp", "name": "my-webapp", "replicas": 2, "image": "nginx:alpine"}
-INFO  Creating Deployment for WebApp  {"deployment": "my-webapp-deployment"}
-INFO  Deployment created successfully
+2026-...Z  INFO  Reconciling WebApp  {"controller": "webapp", "controllerGroup": "apps.tinkerwithtech.dev", "controllerKind": "WebApp", "WebApp": {"name":"my-webapp","namespace":"webapp-demo"}, "name": "my-webapp", "replicas": 2, "image": "nginx:alpine"}
+2026-...Z  INFO  Creating Deployment for WebApp  {"controller": "webapp", "deployment": "my-webapp-deployment"}
+2026-...Z  INFO  Deployment created successfully  {"controller": "webapp"}
 ```
 </ExpectedOutput>
 

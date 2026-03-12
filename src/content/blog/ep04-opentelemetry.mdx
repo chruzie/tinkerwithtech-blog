@@ -65,7 +65,7 @@ The Collector is the **central bus**. It decouples your application instrumentat
 
 ## Setup
 
-<Step number={1} title="Create the k3d cluster" time="~1 min">
+<Step number="1" title="Create the k3d cluster" time="~1 min">
 
 ```bash
 k3d cluster create otel --agents 1 --wait \
@@ -79,7 +79,7 @@ kubectl config rename-context k3d-otel k3d-otel 2>/dev/null || true
 
 </Step>
 
-<Step number={2} title="Create namespaces" time="~30 sec">
+<Step number="2" title="Create namespaces" time="~30 sec">
 
 ```bash
 kubectl create namespace observability --context k3d-otel
@@ -88,7 +88,7 @@ kubectl create namespace sample-app --context k3d-otel
 
 </Step>
 
-<Step number={3} title="Install kube-prometheus-stack" time="~5 min">
+<Step number="3" title="Install kube-prometheus-stack" time="~5 min">
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -117,7 +117,7 @@ kubectl rollout status deployment/kube-prometheus-stack-grafana -n observability
 
 </Step>
 
-<Step number={4} title="Install the OTel Collector" time="~3 min">
+<Step number="4" title="Install the OTel Collector" time="~3 min">
 
 ```bash
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
@@ -206,7 +206,7 @@ kubectl rollout status deployment/otel-collector -n observability --context k3d-
 
 </Step>
 
-<Step number={5} title="Deploy the sample app" time="~2 min">
+<Step number="5" title="Deploy the sample app" time="~2 min">
 
 A minimal load generator that sends all three OTLP signals every 10 seconds — no language SDK required:
 
@@ -260,7 +260,7 @@ kubectl rollout status deployment/sample-app -n sample-app --context k3d-otel
 
 </Step>
 
-<Step number={6} title="Start port-forwards" time="~30 sec">
+<Step number="6" title="Start port-forwards" time="~30 sec">
 
 ```bash
 kubectl port-forward -n observability svc/kube-prometheus-stack-grafana 3000:80 \

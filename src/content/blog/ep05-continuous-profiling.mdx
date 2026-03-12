@@ -1,0 +1,325 @@
+---
+title: "Continuous Profiling on Kubernetes: Find CPU Hotspots with Parca and Zero Code Changes"
+date: "2026-03-09"
+description: "Metrics, traces, and logs can't tell you which function is burning your CPU. Continuous profiling can. Full homelab setup: Parca + Parca Agent on k3d — eBPF, no SDK, no restarts."
+season: 1
+episode: 5
+tags: ["continuous-profiling", "parca", "ebpf", "kubernetes", "observability", "cncf", "flame-graph", "performance"]
+published: false
+---
+
+Your P99 latency just spiked 40%.
+
+Metrics show CPU usage is up. Traces confirm the request took longer — but all your spans look normal. Nothing in the logs explains it. You know *something* is slow, but you have no idea *where*.
+
+This is the gap metrics, traces, and logs cannot fill. **Continuous profiling fills it.**
+
+This post walks through deploying Parca and Parca Agent on a local k3d cluster. No SDK. No application changes. The eBPF-based agent profiles every container on the node automatically and ships CPU flame graphs to the Parca server.
+
+---
+
+## The Fourth Observability Signal
+
+The three pillars give you:
+
+| Signal | Answers |
+|--------|---------|
+| Metrics | *Is something wrong? How often?* |
+| Traces | *Where in the request path?* |
+| Logs | *What events occurred?* |
+| **Profiling** | ***Which function is consuming the CPU?*** |
+
+Profiling works by sampling the call stack of every running process every 10 milliseconds. Each sample captures the full chain of function calls at that moment. Aggregate thousands of samples and the hot paths become visible as a flame graph — the width of each block is proportional to CPU time.
+
+**Why continuous?** Traditional profiling is triggered manually — you SSH into a box during an incident, run `perf` or `py-spy`, then turn it off. By then the spike may have passed, and you've lost data from before the incident. Continuous profiling always runs, at negligible overhead, so you can query historical profiles from before the problem started.
+
+---
+
+## Parca Architecture
+
+```
+k3d cluster: ep05-profiling
+│
+├── parca namespace
+│   ├── parca (Deployment)       ← Server: stores profiles, serves flame graph UI on :7070
+│   └── parca-agent (DaemonSet)  ← eBPF profiler: samples every process on the node
+│
+└── sample-app namespace
+    └── sample-app               ← CPU-bound workload (generates visible flame graph)
+```
+
+**Parca Agent** uses eBPF to attach to the Linux perf subsystem at the kernel level. It:
+1. Discovers processes by watching the cgroup hierarchy (maps profiles to k8s pod labels)
+2. Samples stack traces at 10ms intervals via the kernel — zero user-space overhead
+3. Uploads compressed profiles to the Parca server over gRPC on port 7070
+
+**Parca Server** stores profiles in a time-series format and serves the query UI. You can select any label (pod name, namespace, container) and view the flame graph for any time window.
+
+---
+
+## Prerequisites
+
+| Tool | Install |
+|------|---------|
+| `kubectl` | `brew install kubectl` |
+| `k3d` | `brew install k3d` |
+| `helm` | `brew install helm` |
+
+No Go SDK. No language changes. No cloud credentials.
+
+<Callout type="info">
+Parca Agent requires Linux kernel 5.8+ for eBPF CO-RE support. On macOS, k3d uses a Linux VM (via Lima or Virtualization.framework) — kernel requirement is automatically satisfied.
+</Callout>
+
+---
+
+## Setup
+
+<Step number="1" title="Create the k3d cluster" time="~1 min">
+
+```bash
+k3d cluster create ep05-profiling --agents 1 --wait \
+  --k3s-arg "--disable=traefik@server:0"
+```
+
+<Callout type="check">
+`kubectl cluster-info --context k3d-ep05-profiling` returns without error.
+</Callout>
+
+</Step>
+
+<Step number="2" title="Create namespaces" time="~30 sec">
+
+```bash
+kubectl create namespace parca --context k3d-ep05-profiling
+kubectl create namespace sample-app --context k3d-ep05-profiling
+```
+
+</Step>
+
+<Step number="3" title="Install Parca Server" time="~3 min">
+
+```bash
+helm repo add parca https://charts.parca.dev
+helm repo update
+
+helm install parca parca/parca \
+  --namespace parca \
+  --kube-context k3d-ep05-profiling \
+  --wait \
+  --timeout=300s
+```
+
+```bash
+kubectl rollout status deployment/parca -n parca --context k3d-ep05-profiling
+```
+
+<Callout type="check">
+`kubectl get pods -n parca --context k3d-ep05-profiling` shows `parca-*` pod in Running state.
+</Callout>
+
+</Step>
+
+<Step number="4" title="Install Parca Agent" time="~2 min">
+
+```bash
+helm install parca-agent parca/parca-agent \
+  --namespace parca \
+  --kube-context k3d-ep05-profiling \
+  --set config.remoteStoreAddress="parca.parca.svc.cluster.local:7070" \
+  --set config.remoteStoreBearerToken="" \
+  --set config.remoteStoreInsecure=true \
+  --wait \
+  --timeout=300s
+```
+
+<Callout type="info">
+The agent runs as a **DaemonSet** — one pod per node. On a single-node k3d cluster, one agent pod profiles every container on the machine.
+</Callout>
+
+```bash
+kubectl get daemonset parca-agent -n parca --context k3d-ep05-profiling
+```
+
+<ExpectedOutput>
+```
+NAME          DESIRED   CURRENT   READY   NODE SELECTOR
+parca-agent   1         1         1       <none>
+```
+</ExpectedOutput>
+
+</Step>
+
+<Step number="5" title="Deploy the CPU-bound sample app" time="~1 min">
+
+```bash
+kubectl apply --context k3d-ep05-profiling -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  namespace: sample-app
+  labels:
+    app: sample-app
+    parca.dev/scrape: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sample-app
+  template:
+    metadata:
+      labels:
+        app: sample-app
+        parca.dev/scrape: "true"
+    spec:
+      containers:
+        - name: cpu-worker
+          image: busybox:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting CPU load generator..."
+              while true; do
+                i=0
+                while [ $i -lt 100000 ]; do
+                  i=$((i + 1))
+                done
+                sleep 1
+              done
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+EOF
+
+kubectl rollout status deployment/sample-app -n sample-app --context k3d-ep05-profiling
+```
+
+</Step>
+
+<Step number="6" title="Start port-forward and open Parca UI" time="~30 sec">
+
+```bash
+kubectl port-forward svc/parca 7070:7070 -n parca \
+  --context k3d-ep05-profiling &
+```
+
+Open **http://localhost:7070** in your browser.
+
+<Callout type="info">
+Profile data takes 30–60 seconds to appear after the agent starts. If the label selector is empty, wait a moment and refresh.
+</Callout>
+
+</Step>
+
+---
+
+## Verification
+
+```bash
+./setup.sh --verify
+# 10 passed / 0 failed
+```
+
+**Confirm Parca Agent is collecting profiles:**
+
+```bash
+kubectl logs -n parca -l app.kubernetes.io/name=parca-agent \
+  --context k3d-ep05-profiling --tail=20
+```
+
+<ExpectedOutput>
+```
+level=info  msg="Starting Parca Agent"  version=v0.31.0
+level=info  msg="Loading eBPF program into kernel"
+level=info  msg="eBPF map created"  map=stack_counts
+level=info  msg="Process discovered"  pid=1423  pod=sample-app-6d9c8b7f4-p2xnk
+level=info  msg="Capturing profiles"  interval=10ms  processes=2
+level=info  msg="Profile uploaded to server"  pid=1423  labels="{pod=sample-app}"
+```
+</ExpectedOutput>
+
+<Callout type="success">
+eBPF program loaded. Processes discovered via cgroup hierarchy. Profiles uploading every 10 seconds. **No changes to the sample app. No SDK. No restart.**
+</Callout>
+
+---
+
+## Reading the Flame Graph
+
+In the Parca UI at http://localhost:7070:
+
+1. **Select a label** from the dropdown — choose `{namespace="sample-app"}` or `{pod="sample-app-*"}`
+2. **Choose a time range** — the last 5 minutes will show live data
+3. **Click Query** — the flame graph renders
+
+**How to read it:**
+
+```
+┌──────────────────────────────────────────────────────────────────┐  ← widest = hottest
+│                   sh (busybox shell)                             │
+├──────────────────┬───────────────────────────────────────────────┤
+│  sleep           │             arithmetic loop body              │  ← second level
+└──────────────────┴───────────────────────────────────────────────┘
+```
+
+- **Width** = CPU time (wider = more time spent here)
+- **Stack grows upward** — the bottom is the entry point, top is the leaf function
+- **Widest block at top** = the function to optimise first
+
+For the busybox sample app, the tight `while` loop appears as the widest block — exactly the CPU work we scripted.
+
+---
+
+## Profile Diffing
+
+Parca supports comparing two time windows — useful for validating performance fixes:
+
+1. In the Parca UI, switch to the **Diff** tab
+2. Select **Profile A** (before your change) and **Profile B** (after)
+3. Red blocks = functions that got *slower*, Green blocks = functions that got *faster*
+
+This makes it possible to prove — not just claim — that a performance PR reduced CPU usage.
+
+---
+
+## What You Built
+
+```
+k3d cluster: ep05-profiling
+└── parca/
+    ├── parca          ← Server + UI (flame graphs, profile diff, label queries)
+    └── parca-agent    ← DaemonSet eBPF profiler (zero app changes)
+
+sample-app/
+└── sample-app         ← busybox CPU loop, profiled automatically
+```
+
+**Key facts:**
+
+| Concept | Detail |
+|---------|--------|
+| eBPF overhead | < 1% CPU — safe to run always-on in production |
+| Profile resolution | 10ms sample interval (100 samples/sec per process) |
+| Data retention | Configurable; default in-memory for demo, use object storage for production |
+| CNCF status | Sandbox project — active development, Grafana Pyroscope is the graduated alternative |
+| No SDK required | Agent reads debug symbols from compiled binaries — works with Go, Rust, C, Python |
+
+## Teardown
+
+```bash
+# Stop port-forward
+pkill -f "port-forward.*parca" 2>/dev/null
+
+# Delete the cluster
+k3d cluster delete ep05-profiling
+```
+
+---
+
+Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)
