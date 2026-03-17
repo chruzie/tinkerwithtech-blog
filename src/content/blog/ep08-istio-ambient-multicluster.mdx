@@ -1,0 +1,520 @@
+---
+title: "Istio Ambient Mode: Two Clusters, Zero Sidecars, Full mTLS"
+date: "2026-03-17"
+description: "Set up a two-cluster Istio mesh in ambient mode with ztunnel and waypoint proxies. Full mTLS across clusters, HTTP AuthorizationPolicy enforcement, Kiali mesh graph — no sidecars."
+season: 1
+episode: 8
+tags: ["istio", "ambient-mode", "kubernetes", "service-mesh", "ztunnel", "multi-cluster", "mtls", "cncf"]
+published: false
+---
+
+Every Istio sidecar injects roughly 50 MB of Envoy into your pod. Multiply that across a large fleet and you're paying real memory budget for proxy overhead before your application runs a single request. Sidecar misconfiguration also takes the pod with it — a wrong `DestinationRule` can put your service in a crash loop.
+
+Ambient mode changes the resource model. ztunnel runs as a DaemonSet — one proxy per node, shared by every pod on that node. It handles L4 mTLS, SPIFFE identity, and basic routing. When you need L7 — HTTP-aware `AuthorizationPolicy`, header matching, gRPC routing — you add a waypoint proxy per namespace. The per-pod Envoy sidecar is gone from both paths.
+
+---
+
+## Prerequisites
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| `k3d` | v5+ | Local k3s clusters in Docker |
+| `kubectl` | v1.29+ | Kubernetes CLI |
+| `istioctl` | 1.23+ | Ambient mode requires 1.23 minimum |
+| `helm` | v3+ | Installs Cilium, Istio, Kiali |
+| Docker | — | 8 GB memory allocated |
+
+Confirm `istioctl` version before starting — ambient mode graduated to stable in 1.23 and earlier builds lack required ztunnel capabilities:
+
+```bash
+istioctl version --client --short
+```
+
+Clone the repo and change into the episode directory:
+
+```bash
+git clone https://github.com/chruzie/tinkerwithtech.git
+cd tinkerwithtech/season1/ep08-istio-ambient-multicluster
+```
+
+Or download the setup script directly:
+
+```bash
+curl -fsSL https://blog.tinkerwithtech.io/scripts/ep08-istio-ambient-multicluster/setup.sh -o setup.sh
+chmod +x setup.sh
+```
+
+---
+
+## Architecture
+
+The setup uses two k3d clusters sharing Docker networking. `k3d-mesh-primary` runs the Istio control plane (`istiod`). `k3d-mesh-remote` runs only ztunnel — no `istiod`, no injected sidecars anywhere.
+
+```
+k3d-mesh-primary                          k3d-mesh-remote
+────────────────────────────────          ────────────────────────────────
+istio-system                              istio-system
+  istiod           (control plane)          ztunnel DaemonSet
+  ztunnel DaemonSet                         east-west GW (port 15443)
+  east-west GW (port 15443)
+  Kiali + Prometheus                      httpbin namespace  [ambient]
+                                            httpbin deployment
+default namespace  [ambient]                waypoint proxy
+  curl pod
+  ServiceAccount: curl
+
+Cross-cluster request path:
+  curl → ztunnel@primary
+       → east-west GW (15443, TLS passthrough)
+       → east-west GW@remote
+       → waypoint proxy (L7 AuthorizationPolicy enforcement)
+       → httpbin
+
+SPIFFE identity on the wire:
+  caller:      spiffe://cluster.local/ns/default/sa/curl
+  destination: spiffe://cluster.local/ns/httpbin/sa/default
+  cert issuer: istiod on primary (single trust domain for both clusters)
+```
+
+### ztunnel vs waypoint — when each applies
+
+ztunnel handles L4: encryption, SPIFFE identity verification, and HBONE tunnel establishment. Every pod in an ambient-enrolled namespace gets ztunnel coverage automatically at the node level. No annotation required on the pod.
+
+The waypoint proxy is optional and per-namespace. Add it when you need HTTP-aware policy — `AuthorizationPolicy` with `methods`, `paths`, or `headers` fields. Without a waypoint, `AuthorizationPolicy` still applies at L4 (by source principal) but cannot inspect HTTP semantics.
+
+In this episode `httpbin` gets a waypoint on the remote cluster. The `curl` namespace on the primary does not — it only needs L4 egress mTLS.
+
+### Multi-cluster single mesh
+
+Both clusters share one trust domain (`cluster.local`), one `istiod`, and one certificate authority. `istioctl create-remote-secret` gives `istiod` on the primary read access to the remote cluster's Kubernetes API server, enabling endpoint discovery across clusters. The east-west gateway on each cluster handles cross-cluster packet forwarding on port 15443 using TLS `AUTO_PASSTHROUGH` — ztunnel owns the encryption, the gateway just routes.
+
+This is a single-mesh setup, not multi-mesh. SPIFFE identities from both clusters are trusted without cross-mesh federation configuration.
+
+---
+
+## Step-by-step
+
+<Step number={1} title="Create two k3d clusters">
+
+Both clusters disable Flannel so Cilium can take over as CNI. Traefik and the built-in service load balancer are also disabled:
+
+```bash
+k3d cluster create mesh-primary \
+  --api-port 6443 \
+  --k3s-arg "--disable=traefik@server:0" \
+  --k3s-arg "--disable=servicelb@server:0" \
+  --k3s-arg "--flannel-backend=none@server:0" \
+  --wait
+
+k3d cluster create mesh-remote \
+  --api-port 6444 \
+  --k3s-arg "--disable=traefik@server:0" \
+  --k3s-arg "--disable=servicelb@server:0" \
+  --k3s-arg "--flannel-backend=none@server:0" \
+  --wait
+```
+
+Then switch to the primary context:
+
+```bash
+kubectl config use-context k3d-mesh-primary
+```
+
+</Step>
+
+<Step number={2} title="Install Cilium CNI on both clusters">
+
+Istio ambient mode requires a CNI that supports the node-level network interception ztunnel depends on. Cilium with `kubeProxyReplacement=false` is the supported configuration for k3d:
+
+```bash
+helm repo add cilium https://helm.cilium.io/ --force-update
+
+for ctx in k3d-mesh-primary k3d-mesh-remote; do
+  helm install cilium cilium/cilium \
+    --version 1.15.5 \
+    --namespace kube-system \
+    --kube-context "${ctx}" \
+    --set operator.replicas=1 \
+    --set ipam.mode=kubernetes \
+    --set kubeProxyReplacement=false \
+    --wait \
+    --timeout 5m
+done
+```
+
+Wait for nodes to be Ready on both clusters before proceeding — ztunnel will crash if Cilium hasn't finished initializing:
+
+```bash
+for ctx in k3d-mesh-primary k3d-mesh-remote; do
+  kubectl wait node --all --for=condition=Ready \
+    --context "${ctx}" --timeout=120s
+done
+```
+
+</Step>
+
+<Step number={3} title="Install Istio ambient on the primary cluster">
+
+The Helm install order matters: base CRDs first, then `istiod`, then Istio CNI, then ztunnel.
+
+```bash
+helm repo add istio https://istio-release.storage.googleapis.com/charts --force-update
+helm repo update
+
+# Base CRDs
+helm install istio-base istio/base \
+  --namespace istio-system \
+  --create-namespace \
+  --kube-context k3d-mesh-primary \
+  --set defaultRevision=default \
+  --version 1.23.2 \
+  --wait
+
+# Control plane — ambient profile disables sidecar injection by default
+helm install istiod istio/istiod \
+  --namespace istio-system \
+  --kube-context k3d-mesh-primary \
+  --set profile=ambient \
+  --set meshConfig.accessLogFile=/dev/stdout \
+  --version 1.23.2 \
+  --wait \
+  --timeout 5m
+
+# Istio CNI — required for ambient node-level interception
+helm install istio-cni istio/cni \
+  --namespace istio-system \
+  --kube-context k3d-mesh-primary \
+  --set profile=ambient \
+  --version 1.23.2 \
+  --wait
+
+# ztunnel — clusterName must match the remote secret name created later
+helm install ztunnel istio/ztunnel \
+  --namespace istio-system \
+  --kube-context k3d-mesh-primary \
+  --set multiCluster.clusterName=mesh-primary \
+  --version 1.23.2 \
+  --wait
+```
+
+Confirm the DaemonSet rolled out:
+
+```bash
+kubectl rollout status daemonset/ztunnel \
+  -n istio-system --context k3d-mesh-primary --timeout=180s
+```
+
+</Step>
+
+<Step number={4} title="Join the remote cluster to the mesh">
+
+The remote cluster needs the Istio base CRDs, Istio CNI, and ztunnel. It does not get `istiod`.
+
+```bash
+# Base CRDs on remote
+helm install istio-base istio/base \
+  --namespace istio-system \
+  --create-namespace \
+  --kube-context k3d-mesh-remote \
+  --set defaultRevision=default \
+  --version 1.23.2 \
+  --wait
+
+# Istio CNI on remote
+helm install istio-cni istio/cni \
+  --namespace istio-system \
+  --kube-context k3d-mesh-remote \
+  --set profile=ambient \
+  --version 1.23.2 \
+  --wait
+
+# Remote secret — gives istiod on primary API server access to the remote cluster
+istioctl create-remote-secret \
+  --context=k3d-mesh-remote \
+  --name=mesh-remote \
+  | kubectl apply --context=k3d-mesh-primary -f -
+
+# ztunnel on remote — clusterName must match --name above
+helm install ztunnel istio/ztunnel \
+  --namespace istio-system \
+  --kube-context k3d-mesh-remote \
+  --set multiCluster.clusterName=mesh-remote \
+  --version 1.23.2 \
+  --wait
+```
+
+The `multiCluster.clusterName` value on the remote ztunnel must exactly match the `--name` flag passed to `create-remote-secret`. A mismatch causes endpoint discovery failures that are difficult to diagnose from logs alone.
+
+</Step>
+
+<Step number={5} title="Install east-west gateways and expose services">
+
+Apply the east-west gateway manifest to both clusters. The gateway runs Envoy in `AUTO_PASSTHROUGH` mode on port 15443 — it forwards raw TLS without terminating it, so ztunnel remains responsible for encryption.
+
+```bash
+kubectl apply --context k3d-mesh-primary \
+  -f manifests/east-west-gateway.yaml
+
+kubectl apply --context k3d-mesh-remote \
+  -f manifests/east-west-gateway.yaml
+```
+
+The gateway manifest includes a `Gateway` resource with `tls.mode: AUTO_PASSTHROUGH` on port 15443 and a `ServiceEntry` that exposes istiod across the mesh:
+
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: cross-network-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: eastwestgateway
+  servers:
+  - port:
+      number: 15443
+      name: tls
+      protocol: TLS
+    tls:
+      mode: AUTO_PASSTHROUGH
+    hosts:
+    - "*.local"
+```
+
+The east-west gateway Service type is `LoadBalancer`. It will show `<pending>` for `EXTERNAL-IP` in k3d — this is expected. Istio uses the pod IP for internal east-west routing, so the pending external IP does not affect cross-cluster traffic.
+
+Expose services on both clusters:
+
+```bash
+kubectl apply --context k3d-mesh-primary \
+  -f manifests/expose-services.yaml
+kubectl apply --context k3d-mesh-remote \
+  -f manifests/expose-services.yaml
+```
+
+</Step>
+
+<Step number={6} title="Deploy httpbin and curl client">
+
+Create the `httpbin` namespace on the remote cluster and enroll it in the ambient mesh with a single label:
+
+```bash
+kubectl create namespace httpbin --context k3d-mesh-remote
+
+kubectl label namespace httpbin \
+  istio.io/dataplane-mode=ambient \
+  --context k3d-mesh-remote --overwrite
+```
+
+Deploy httpbin:
+
+```bash
+kubectl apply --context k3d-mesh-remote \
+  -n httpbin \
+  -f manifests/httpbin.yaml
+```
+
+The manifest uses `docker.io/kong/httpbin:0.1.0` — a maintained fork of the original `kennethreitz/httpbin`. Enroll the `default` namespace on the primary cluster and deploy the curl client:
+
+```bash
+kubectl label namespace default \
+  istio.io/dataplane-mode=ambient \
+  --context k3d-mesh-primary --overwrite
+
+kubectl apply --context k3d-mesh-primary \
+  -f manifests/curl-client.yaml
+```
+
+The curl client manifest creates a `ServiceAccount` named `curl` and a pod that uses it. The service account name becomes part of the SPIFFE identity that the `AuthorizationPolicy` will reference.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: curl
+  namespace: default
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curl
+  namespace: default
+spec:
+  serviceAccountName: curl
+  containers:
+  - name: curl
+    image: curlimages/curl:8.4.0
+    command: ["sleep", "infinity"]
+```
+
+Wait for the curl pod:
+
+```bash
+kubectl wait pod curl \
+  --for=condition=Ready \
+  --context k3d-mesh-primary \
+  --timeout=120s
+```
+
+</Step>
+
+<Step number={7} title="Install Kiali and Prometheus">
+
+Kiali needs Prometheus for the mesh graph. Install both on the primary cluster:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
+helm repo add kiali https://kiali.org/helm-charts --force-update
+helm repo update
+
+helm install prometheus prometheus-community/prometheus \
+  --namespace istio-system \
+  --kube-context k3d-mesh-primary \
+  --set alertmanager.enabled=false \
+  --set pushgateway.enabled=false \
+  --set server.persistentVolume.enabled=false \
+  --wait \
+  --timeout 5m
+
+helm install kiali-server kiali/kiali-server \
+  --namespace istio-system \
+  --kube-context k3d-mesh-primary \
+  --set auth.strategy=anonymous \
+  --set external_services.prometheus.url="http://prometheus-server.istio-system.svc.cluster.local" \
+  --wait \
+  --timeout 5m
+```
+
+Kiali needs traffic before the mesh graph populates. Run 10–20 GET requests after the full setup and wait at least 2 minutes for Prometheus to scrape the metrics. Prometheus scrape interval defaults to 30s.
+
+</Step>
+
+<Step number={8} title="Add waypoint proxy and AuthorizationPolicy">
+
+The waypoint proxy adds L7 enforcement to the `httpbin` namespace. `--enroll-namespace` sets the `istio.io/use-waypoint: waypoint` annotation on the namespace — without that annotation, L7 policies are not enforced even when the waypoint pod is running.
+
+```bash
+istioctl waypoint apply \
+  --context=k3d-mesh-remote \
+  --namespace httpbin \
+  --enroll-namespace \
+  --wait
+```
+
+Apply the `AuthorizationPolicy`:
+
+```bash
+kubectl apply --context k3d-mesh-remote \
+  -f manifests/authz-policy.yaml
+```
+
+The policy targets the `httpbin` Service by `targetRefs` (the waypoint-aware selector) and allows only GET requests from the curl service account:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: httpbin-allow-get-only
+  namespace: httpbin
+spec:
+  targetRefs:
+  - kind: Service
+    group: ""
+    name: httpbin
+  rules:
+  - from:
+    - source:
+        principals:
+        - "cluster.local/ns/default/sa/curl"
+    to:
+    - operation:
+        methods:
+        - GET
+```
+
+The principal format is `cluster.local/ns/<namespace>/sa/<serviceaccount>` — without the `spiffe://` prefix. The `spiffe://` prefix appears in ztunnel logs and is the correct X.509 URI SAN format, but `AuthorizationPolicy` strips it in the `principals` field.
+
+</Step>
+
+<Step number={9} title="Hero — GET allowed, POST blocked, Kiali confirms">
+
+Send a GET request from curl on the primary cluster to httpbin on the remote:
+
+```bash
+kubectl exec pod/curl --context k3d-mesh-primary -- \
+  curl -sv "http://httpbin.httpbin.svc.cluster.local/get" 2>&1 | \
+  grep -E "< HTTP|origin|X-Forwarded"
+```
+
+Expected output includes `< HTTP/1.1 200 OK` and a JSON body showing the request originated from the primary cluster's pod CIDR.
+
+Send a POST request — the waypoint blocks it:
+
+```bash
+kubectl exec pod/curl --context k3d-mesh-primary -- \
+  curl -sv -X POST "http://httpbin.httpbin.svc.cluster.local/post" 2>&1 | \
+  grep -E "< HTTP|RBAC|access denied|403"
+```
+
+Expected output: `< HTTP/1.1 403 Forbidden` and the body `RBAC: access denied`. The block happens at the waypoint before the request reaches `httpbin`.
+
+Check SPIFFE identity in ztunnel logs on the primary:
+
+```bash
+kubectl logs -n istio-system -l app=ztunnel \
+  --tail=25 --context k3d-mesh-primary | \
+  grep -E "spiffe|mtls|HBONE|peer"
+```
+
+Open Kiali:
+
+```bash
+kubectl port-forward svc/kiali-server \
+  -n istio-system 20001:20001 \
+  --context k3d-mesh-primary &
+
+open http://localhost:20001
+```
+
+Navigate to Graph, select the `httpbin` namespace. The edge between curl and httpbin shows a mTLS lock icon. Click the edge and open the Security tab — Kiali shows the SPIFFE identities on both ends of the connection.
+
+</Step>
+
+---
+
+## Verification
+
+Run the built-in verification script before recording or handing off:
+
+```bash
+./setup.sh --verify
+```
+
+The 12 checks cover:
+
+| # | Check | What it confirms |
+|---|-------|-----------------|
+| 1 | Primary cluster reachable | `kubectl get nodes` on `k3d-mesh-primary` |
+| 2 | Remote cluster reachable | `kubectl get nodes` on `k3d-mesh-remote` |
+| 3 | istiod running on primary | Deployment exists in `istio-system` |
+| 4 | ztunnel DaemonSet on primary | Node-level proxy running |
+| 5 | ztunnel DaemonSet on remote | Node-level proxy running |
+| 6 | Remote cluster secret on primary | `istio-remote-secret-mesh-remote` present |
+| 7 | httpbin running on remote | Deployment ready in `httpbin` namespace |
+| 8 | curl pod running on primary | Pod ready in `default` namespace |
+| 9 | Waypoint gateway in httpbin | `gateway/waypoint` exists |
+| 10 | AuthorizationPolicy applied | `httpbin-allow-get-only` exists |
+| 11 | Cross-cluster HTTP GET succeeds | Live curl from primary to remote |
+| 12 | Kiali running on primary | Deployment ready |
+
+The cross-cluster GET in check 11 is the end-to-end integration test. It exercises Cilium CNI, ztunnel interception on both clusters, the remote secret endpoint discovery, and east-west gateway routing. If it passes, the mesh is wired correctly.
+
+---
+
+## What changes, what stays the same
+
+No annotations on pods. No `sidecar.istio.io/inject` label. No per-pod resource requests for Envoy. ztunnel costs approximately 70 MB per node, shared across every pod on that node.
+
+What doesn't change: the `AuthorizationPolicy` spec is identical to sidecar mode. SPIFFE identity is the same trust model. Kiali observability works the same way. Existing sidecar-mode namespaces can run alongside ambient-mode namespaces in the same cluster — migration is per-namespace, not a cluster-wide flag day.
+
+The setup script and all manifests are at `season1/ep08-istio-ambient-multicluster/` in the repo.
