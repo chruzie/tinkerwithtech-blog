@@ -1,0 +1,234 @@
+---
+title: "Block Unsigned Container Images at the Kubernetes API with Kyverno and Cosign"
+date: "2026-03-18"
+description: "Learn how to enforce container image signing with Cosign and Kyverno on Kubernetes. Block unsigned images at the admission layer — before they reach a node. Full k3d demo."
+season: 1
+episode: 6
+tags: ["kubernetes", "kyverno", "cosign", "sigstore", "supply-chain-security", "admission-controller", "container-security"]
+published: false
+---
+
+SolarWinds. Log4Shell. XZ Utils. Every major incident in the last five years had a supply chain component. The attack surface isn't just your code — it's every container image you pull.
+
+A container image travels through registries, CDNs, and CI pipelines before Kubernetes schedules it. Any of those hops can be tampered with. The question is: how does Kubernetes know the image it's pulling is the one you actually built?
+
+The answer is image signing. Cosign attaches a cryptographic signature at build time and records it in Rekor, a public transparency log. Kyverno verifies that signature at the Kubernetes admission layer — before any pod reaches a node.
+
+## Prerequisites
+
+You need the following tools installed:
+
+```bash
+# Check prerequisites
+kubectl version --client
+helm version
+docker --version
+k3d version
+cosign version
+```
+
+If `cosign` is missing, install it:
+
+```bash
+brew install cosign
+```
+
+Clone the repo and run the setup script:
+
+```bash
+curl -fsSL https://blog.tinkerwithtech.io/scripts/ep06-supply-chain-security/setup.sh -o setup.sh
+chmod +x setup.sh
+./setup.sh
+```
+
+This creates a k3d cluster, installs Kyverno, and applies the image signing policy. The full setup takes about 2 minutes.
+
+## Architecture
+
+The enforcement pipeline has two stages:
+
+```
+Developer
+  └─ cosign sign image → Rekor transparency log (public, append-only)
+
+kubectl apply Pod
+  └─ Kubernetes API server
+       └─ Kyverno admission webhook (MutatingWebhookConfiguration)
+            └─ verifyImages: query Rekor for signature matching image digest
+                 ├─ Valid signature found → ALLOW — pod admitted, scheduled, runs
+                 └─ No signature found  → DENY  — admission denied, pod never created
+```
+
+Kyverno registers a `ValidatingWebhookConfiguration` with the Kubernetes API server. Every pod creation request hits the webhook before it reaches the scheduler. The webhook queries Rekor, and if no valid signature exists for the image digest, it returns a non-2xx status — which the API server treats as a rejection.
+
+The critical property: the API server calls the webhook for every request, every time. There is no opt-out at the pod level, no label to skip it, no node where it doesn't apply. Runtime agents can be disabled or bypassed. Admission webhooks cannot be bypassed without disabling Kyverno itself.
+
+## Step-by-step
+
+### Step 1 — Create the k3d cluster
+
+```bash
+k3d cluster create ep06-supply-chain \
+  --agents 1 \
+  --wait \
+  --k3s-arg "--disable=traefik@server:0"
+```
+
+The `--disable=traefik` flag keeps the cluster lean. Traefik is not needed for this demo.
+
+### Step 2 — Install Kyverno
+
+```bash
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm repo update
+
+helm install kyverno kyverno/kyverno \
+  --namespace kyverno \
+  --create-namespace \
+  --wait \
+  --timeout=300s
+```
+
+Wait for the admission controller to be ready:
+
+```bash
+kubectl wait --for=condition=Ready pod \
+  -l app.kubernetes.io/component=admission-controller \
+  -n kyverno \
+  --context k3d-ep06-supply-chain \
+  --timeout=120s
+```
+
+### Step 3 — Create the demo namespace
+
+```bash
+kubectl create namespace demo --context k3d-ep06-supply-chain
+```
+
+### Step 4 — Apply the image signing policy
+
+The `ClusterPolicy` below enforces that all pods in the `demo` namespace must use images signed with Cosign. Unsigned images are blocked at admission.
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-image-signature
+  annotations:
+    policies.kyverno.io/title: Require Signed Images
+    policies.kyverno.io/description: >-
+      Requires all container images in the demo namespace to be signed
+      with Cosign before admission.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: check-image-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - demo
+      verifyImages:
+        - imageReferences:
+            - "*"
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: "YOUR_SIGNING_SUBJECT"
+                    issuer: "https://accounts.google.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+```
+
+Apply it:
+
+```bash
+kubectl apply -f manifests/require-image-signature.yaml --context k3d-ep06-supply-chain
+```
+
+Two key fields in the policy:
+
+- `validationFailureAction: Enforce` — blocking mode. `Audit` would log violations without blocking. Always use `Enforce` in production.
+- `verifyImages.attestors[].entries[].keyless` — keyless signing via Sigstore. The `subject` is the OIDC identity that signed the image (e.g., a GitHub Actions workflow URL or a developer's Google account). The `issuer` is the OIDC provider.
+
+### Step 5 — Verify the policy is active
+
+```bash
+kubectl get clusterpolicy require-image-signature --context k3d-ep06-supply-chain -o yaml
+```
+
+Check that `READY` is `True` and `validationFailureAction` is `Enforce`. Also verify the Kyverno webhook is registered:
+
+```bash
+kubectl get validatingwebhookconfiguration \
+  -l webhook.kyverno.io/managed-by=kyverno \
+  --context k3d-ep06-supply-chain
+```
+
+### Step 6 — Try to run an unsigned image
+
+```bash
+kubectl run unsigned --image=nginx:latest -n demo --context k3d-ep06-supply-chain
+```
+
+Expected output:
+
+```
+Error from server: admission webhook "validate.kyverno.svc-fail" denied the request:
+resource Pod/demo/unsigned was blocked due to the following policies
+require-image-signature:
+  check-image-signature: image nginx:latest failed signature verification
+```
+
+The pod is rejected. nginx:latest has no Cosign signature in Rekor. The request never reaches the scheduler.
+
+### Step 7 — Inspect the event log
+
+```bash
+kubectl get events -n demo \
+  --context k3d-ep06-supply-chain \
+  --sort-by=.lastTimestamp
+```
+
+The event log shows `FailedCreate` with the policy violation as the reason. This is the HERO MOMENT: the image never pulled. No sidecar ran. No runtime scan. The enforcement happened at the API layer, before the kubelet was involved.
+
+## Verification
+
+Run the built-in verification check:
+
+```bash
+./setup.sh --verify
+```
+
+All 10 checks should pass:
+
+- k3d cluster exists
+- kubectl context accessible
+- Namespaces kyverno and demo exist
+- Kyverno admission controller running and ready
+- Kyverno background controller running
+- ClusterPolicy `require-image-signature` exists
+- cosign CLI available
+- Kyverno webhook registered
+
+## Teardown
+
+```bash
+./setup.sh --teardown
+```
+
+This deletes the k3d cluster and removes the kubectl context.
+
+## What's next
+
+This demo uses keyless signing — no key management, signatures tied to your OIDC identity. For production, you have two paths:
+
+**Keyless (recommended for CI/CD):** Cosign in GitHub Actions signs with the GitHub OIDC token. The `subject` in the Kyverno policy is the workflow URL (e.g., `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main`). No long-lived keys.
+
+**Key-based:** Generate a Cosign key pair, sign images with the private key, and reference the public key in the Kyverno policy. More portable, but requires key rotation management.
+
+Either way, the Kyverno policy structure is the same — only the `attestors` block changes.
