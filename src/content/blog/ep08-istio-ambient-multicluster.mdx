@@ -27,7 +27,7 @@ Ambient mode changes the resource model. ztunnel runs as a DaemonSet — one pro
 Confirm `istioctl` version before starting — ambient mode graduated to stable in 1.23 and earlier builds lack required ztunnel capabilities:
 
 ```bash
-istioctl version --client --short
+istioctl version --remote=false
 ```
 
 Clone the repo and change into the episode directory:
@@ -94,12 +94,21 @@ This is a single-mesh setup, not multi-mesh. SPIFFE identities from both cluster
 
 ## Step-by-step
 
-<Step number={1} title="Create two k3d clusters">
+<Step number={1} title="Create two k3d clusters on a shared Docker network">
 
-Both clusters disable Flannel so Cilium can take over as CNI. Traefik and the built-in service load balancer are also disabled:
+k3d maps each cluster's API server to a host port (`0.0.0.0:6443`, `0.0.0.0:6444`). Without a shared Docker network, `istioctl create-remote-secret` generates a server URL of `https://0.0.0.0:6444` — unreachable from inside Docker. Placing both clusters on the same Docker bridge network lets them reach each other via container IPs instead.
+
+Create the network first:
+
+```bash
+docker network create k3d-mesh-network
+```
+
+Then create both clusters with `--network k3d-mesh-network`. Both clusters also disable Flannel so Cilium can take over as CNI. Traefik and the built-in service load balancer are disabled:
 
 ```bash
 k3d cluster create mesh-primary \
+  --network k3d-mesh-network \
   --api-port 6443 \
   --k3s-arg "--disable=traefik@server:0" \
   --k3s-arg "--disable=servicelb@server:0" \
@@ -107,11 +116,19 @@ k3d cluster create mesh-primary \
   --wait
 
 k3d cluster create mesh-remote \
+  --network k3d-mesh-network \
   --api-port 6444 \
   --k3s-arg "--disable=traefik@server:0" \
   --k3s-arg "--disable=servicelb@server:0" \
   --k3s-arg "--flannel-backend=none@server:0" \
   --wait
+```
+
+Verify both cluster containers are on the shared network:
+
+```bash
+docker network inspect k3d-mesh-network \
+  --format '{{range .Containers}}{{.Name}} {{end}}'
 ```
 
 Then switch to the primary context:
@@ -171,11 +188,15 @@ helm install istio-base istio/base \
   --wait
 
 # Control plane — ambient profile disables sidecar injection by default
+# global.multiCluster.clusterName is required — without it istiod only knows
+# about "Kubernetes" and ztunnel fails with "client claims to be in cluster
+# 'mesh-primary', but we only know about local cluster 'Kubernetes'"
 helm install istiod istio/istiod \
   --namespace istio-system \
   --kube-context k3d-mesh-primary \
   --set profile=ambient \
   --set meshConfig.accessLogFile=/dev/stdout \
+  --set global.multiCluster.clusterName=mesh-primary \
   --version 1.23.2 \
   --wait \
   --timeout 5m
@@ -208,7 +229,7 @@ kubectl rollout status daemonset/ztunnel \
 
 <Step number={4} title="Join the remote cluster to the mesh">
 
-The remote cluster needs the Istio base CRDs, Istio CNI, and ztunnel. It does not get `istiod`.
+The remote cluster needs the Istio base CRDs and Istio CNI first. The east-west gateways and `expose-services.yaml` must be applied before ztunnel on the remote — ztunnel needs to resolve `istiod.istio-system.svc:15012`, which is only reachable via the east-west gateway `ServiceEntry`. Installing ztunnel first causes it to fail to connect to istiod.
 
 ```bash
 # Base CRDs on remote
@@ -227,13 +248,116 @@ helm install istio-cni istio/cni \
   --set profile=ambient \
   --version 1.23.2 \
   --wait
+```
 
-# Remote secret — gives istiod on primary API server access to the remote cluster
+Install the east-west gateways on both clusters. The manifests use Istio auto-injection (`inject.istio.io/templates: gateway`), so enable injection on `istio-system` first — this is what provides the `/var/run/secrets/istio/root-cert.pem` volume mount the gateway pod needs:
+
+```bash
+kubectl label namespace istio-system istio-injection=enabled \
+  --context=k3d-mesh-primary --overwrite
+
+kubectl label namespace istio-system istio-injection=enabled \
+  --context=k3d-mesh-remote --overwrite
+
+kubectl apply --context k3d-mesh-primary \
+  -f manifests/east-west-gateway.yaml
+
+kubectl apply --context k3d-mesh-remote \
+  -f manifests/east-west-gateway.yaml
+```
+
+After the gateway pods are `Ready`, expose istiod via a `ServiceEntry` pointing at each gateway's pod IP. k3d has no LoadBalancer controller, so the Service `EXTERNAL-IP` stays `<pending>` — using the pod IP directly is the reliable approach:
+
+```bash
+for CTX in k3d-mesh-primary k3d-mesh-remote; do
+  EW_POD_IP=$(kubectl get pod \
+    -l app=istio-eastwestgateway \
+    -n istio-system \
+    --context="${CTX}" \
+    -o jsonpath='{.items[0].status.podIP}')
+
+  kubectl apply --context="${CTX}" -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: cross-network-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: eastwestgateway
+  servers:
+  - port:
+      number: 15443
+      name: tls
+      protocol: TLS
+    tls:
+      mode: AUTO_PASSTHROUGH
+    hosts:
+    - "*.local"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: istiod-mesh-primary
+  namespace: istio-system
+spec:
+  hosts:
+  - istiod.istio-system.svc.cluster.local
+  ports:
+  - number: 15012
+    name: tls-istiod
+    protocol: TLS
+  resolution: STATIC
+  endpoints:
+  - address: "${EW_POD_IP}"
+    ports:
+      tls-istiod: 15012
+    labels:
+      app: istiod
+EOF
+done
+```
+
+Grant `istiod` read access to the remote cluster before creating the remote secret. Without this, istiod gets a 403 Forbidden when listing namespaces during endpoint discovery:
+
+```bash
+kubectl create clusterrolebinding istio-reader-binding \
+  --clusterrole=view \
+  --serviceaccount=istio-system:istio-reader-service-account \
+  --context=k3d-mesh-remote
+```
+
+Create the remote secret using the Docker-internal container IP, not the host-mapped `0.0.0.0` port. The `--server` flag overrides what `istioctl` would otherwise embed:
+
+```bash
+# Resolve the Docker-internal IP of the remote API server container
+REMOTE_API_IP=$(docker inspect k3d-mesh-remote-server-0 \
+  --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' | head -1)
+
+echo "Remote API server container IP: ${REMOTE_API_IP}"
+
 istioctl create-remote-secret \
   --context=k3d-mesh-remote \
   --name=mesh-remote \
+  --server="https://${REMOTE_API_IP}:6443" \
   | kubectl apply --context=k3d-mesh-primary -f -
+```
 
+> **Why not `0.0.0.0:6444`?** k3d exposes each cluster's API server via a host port binding. When `istioctl create-remote-secret` omits `--server`, it picks up `https://0.0.0.0:6444` from the kubeconfig. That address is the host machine's loopback — unreachable from inside the `istiod` container. Using the Docker-internal container IP means istiod can reach the remote API server directly over the shared Docker bridge network.
+
+Copy the CA root cert from primary to remote, then sync the trust bundle before starting ztunnel:
+
+```bash
+kubectl get configmap istio-ca-root-cert \
+  -n istio-system \
+  --context=k3d-mesh-primary \
+  -o yaml \
+  | kubectl apply --context=k3d-mesh-remote -n istio-system -f -
+```
+
+Now install ztunnel on the remote cluster — istiod is reachable via the east-west gateway at this point:
+
+```bash
 # ztunnel on remote — clusterName must match --name above
 helm install ztunnel istio/ztunnel \
   --namespace istio-system \
@@ -247,17 +371,9 @@ The `multiCluster.clusterName` value on the remote ztunnel must exactly match th
 
 </Step>
 
-<Step number={5} title="Install east-west gateways and expose services">
+<Step number={5} title="East-west gateway reference">
 
-Apply the east-west gateway manifest to both clusters. The gateway runs Envoy in `AUTO_PASSTHROUGH` mode on port 15443 — it forwards raw TLS without terminating it, so ztunnel remains responsible for encryption.
-
-```bash
-kubectl apply --context k3d-mesh-primary \
-  -f manifests/east-west-gateway.yaml
-
-kubectl apply --context k3d-mesh-remote \
-  -f manifests/east-west-gateway.yaml
-```
+The east-west gateway manifest applied in Step 4 runs Envoy in `AUTO_PASSTHROUGH` mode on port 15443 — it forwards raw TLS without terminating it, so ztunnel remains responsible for encryption.
 
 The gateway manifest includes a `Gateway` resource with `tls.mode: AUTO_PASSTHROUGH` on port 15443 and a `ServiceEntry` that exposes istiod across the mesh:
 
@@ -282,15 +398,6 @@ spec:
 ```
 
 The east-west gateway Service type is `LoadBalancer`. It will show `<pending>` for `EXTERNAL-IP` in k3d — this is expected. Istio uses the pod IP for internal east-west routing, so the pending external IP does not affect cross-cluster traffic.
-
-Expose services on both clusters:
-
-```bash
-kubectl apply --context k3d-mesh-primary \
-  -f manifests/expose-services.yaml
-kubectl apply --context k3d-mesh-remote \
-  -f manifests/expose-services.yaml
-```
 
 </Step>
 
