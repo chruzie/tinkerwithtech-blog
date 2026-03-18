@@ -1,0 +1,310 @@
+---
+title: "Istio vs Cilium on Kubernetes: Skip the Sidecar, Keep the Security"
+date: "2026-03-18"
+description: "Cilium delivers mTLS and L7 policy via eBPF — no Envoy sidecars, no injection webhooks. Full k3d demo comparing Istio and Cilium service mesh models."
+season: 1
+episode: 7
+tags: ["cilium", "istio", "service-mesh", "ebpf", "kubernetes", "mtls", "network-policy", "cncf"]
+published: false
+---
+
+Istio's Envoy sidecar intercepts all traffic in your cluster. That's how it delivers mTLS and L7 policy without application changes — the proxy sits in the request path and handles encryption, policy evaluation, and observability on both ends.
+
+The cost: every pod gets an injected container. Your `READY` column goes from `1/1` to `2/2`. A webhook fires on every deployment. Each request pays a latency penalty traversing two proxies.
+
+Cilium delivers the same guarantees from inside the Linux kernel. eBPF programs enforce mTLS via WireGuard and L7 policy before packets leave the host. No sidecars. No injection. Near-zero overhead.
+
+---
+
+## The Two Models
+
+```
+Istio model
+───────────
+Pod: [your-app] + [envoy-sidecar]
+                    ↑
+          Intercepts all traffic
+          Enforces mTLS + L7 policy
+          Adds ~50ms per request hop
+
+Cilium model
+────────────
+Pod: [your-app]
+Node kernel: [eBPF program]
+              ↑
+    Enforces mTLS + L7 policy
+    At network layer — before packets leave host
+    Near-zero overhead
+```
+
+With Istio, policy lives in the proxy fleet. With Cilium, policy lives in the kernel. Same outcome, different architecture.
+
+**When Istio wins:** advanced traffic management — weighted routing, retries, circuit breaking, virtual services, ingress with rich L7 rules. Envoy is purpose-built for this. Cilium's traffic shaping capabilities are more limited.
+
+**When Cilium wins:** network security, multi-tenant isolation, Hubble observability, and minimal operational overhead. If you're not doing canary deployments or complex traffic splitting, Cilium delivers more security with less complexity.
+
+---
+
+## Prerequisites
+
+| Tool | Install |
+|------|---------|
+| `kubectl` | `brew install kubectl` |
+| `k3d` | `brew install k3d` |
+| `helm` | `brew install helm` |
+| `docker` | [docker.com/get-started](https://www.docker.com/get-started) |
+| `cilium` CLI | `brew install cilium-cli` |
+
+Clone the setup script to follow along:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chruzie/tinkerwithtech/main/season1/ep07-istio-vs-cilium/setup.sh \
+  -o setup.sh && chmod +x setup.sh
+```
+
+<Callout type="info">
+Cilium's WireGuard encryption requires Linux kernel 5.6+. On macOS, k3d runs in a Linux VM (Lima or Virtualization.framework) that meets this requirement automatically.
+</Callout>
+
+---
+
+## Step-by-step
+
+### 1. Create the k3d cluster with CNI passthrough
+
+Cilium replaces the default k3d CNI. You need to disable Flannel and ServiceLB:
+
+```bash
+k3d cluster create ep07-mesh \
+  --agents 2 \
+  --wait \
+  --k3s-arg "--disable=traefik@server:0" \
+  --k3s-arg "--disable=servicelb@server:0" \
+  --k3s-arg "--flannel-backend=none@server:0"
+```
+
+The `--flannel-backend=none` flag disables Flannel so Cilium can take over as the CNI.
+
+### 2. Create the demo namespace
+
+```bash
+kubectl create namespace mesh-demo --context k3d-ep07-mesh
+```
+
+### 3. Install Cilium with WireGuard encryption and Hubble
+
+```bash
+helm repo add cilium https://helm.cilium.io
+helm repo update
+
+helm install cilium cilium/cilium \
+  --namespace kube-system \
+  --kube-context k3d-ep07-mesh \
+  --set kubeProxyReplacement=true \
+  --set hubble.relay.enabled=true \
+  --set hubble.ui.enabled=true \
+  --set encryption.enabled=true \
+  --set encryption.type=wireguard \
+  --wait \
+  --timeout=300s
+```
+
+`kubeProxyReplacement=true` tells Cilium to replace kube-proxy entirely using eBPF. WireGuard provides node-to-node encryption for pod traffic.
+
+### 4. Verify Cilium is running
+
+```bash
+kubectl get pods -n kube-system -l k8s-app=cilium --context k3d-ep07-mesh
+```
+
+<ExpectedOutput>
+```
+NAME           READY   STATUS    RESTARTS   AGE
+cilium-4x9zp   1/1     Running   0          2m
+cilium-mq7rn   1/1     Running   0          2m
+cilium-tz8lp   1/1     Running   0          2m
+```
+</ExpectedOutput>
+
+One Cilium pod per node. These are the only additional processes in the networking stack — no per-application sidecars.
+
+### 5. Deploy frontend and backend services
+
+```bash
+kubectl apply --context k3d-ep07-mesh -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: mesh-demo
+  labels:
+    app: frontend
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        version: v1
+    spec:
+      containers:
+        - name: frontend
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c", "while true; do sleep 5; done"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: mesh-demo
+  labels:
+    app: backend
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+    spec:
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:latest
+          args: ["-text=Hello from backend v1", "-listen=:8080"]
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: mesh-demo
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+EOF
+```
+
+```bash
+kubectl rollout status deployment/frontend -n mesh-demo --context k3d-ep07-mesh
+kubectl rollout status deployment/backend -n mesh-demo --context k3d-ep07-mesh
+```
+
+### 6. Apply L7 CiliumNetworkPolicy
+
+```bash
+kubectl apply --context k3d-ep07-mesh -f - <<'EOF'
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: frontend-to-backend
+  namespace: mesh-demo
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backend
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+EOF
+```
+
+This policy restricts access to the backend: only pods with `app=frontend` can reach port 8080. Any other pod is dropped at the kernel level — no TCP connection established.
+
+### 7. Test L7 policy enforcement
+
+```bash
+FRONTEND_POD=$(kubectl get pods -n mesh-demo --context k3d-ep07-mesh \
+  -l app=frontend -o jsonpath='{.items[0].metadata.name}')
+
+kubectl exec -n mesh-demo --context k3d-ep07-mesh "${FRONTEND_POD}" -- \
+  curl -s --max-time 5 http://backend:8080
+```
+
+<ExpectedOutput>
+```
+Hello from backend v1
+```
+</ExpectedOutput>
+
+The frontend can reach the backend because the CiliumNetworkPolicy allows it. A pod without the `app=frontend` label would time out — Cilium drops the packet before it reaches the backend.
+
+---
+
+## Verification
+
+```bash
+./setup.sh --verify
+# 10 passed / 0 failed
+```
+
+---
+
+## Hero Moment: Zero Sidecars
+
+```bash
+kubectl get pods -n mesh-demo --context k3d-ep07-mesh
+```
+
+<ExpectedOutput>
+```
+NAME                        READY   STATUS    RESTARTS   AGE
+backend-7d5f9c8b6-k4xpn     1/1     Running   0          3m
+frontend-6c8b7f4d9-mw2qj    1/1     Running   0          3m
+```
+</ExpectedOutput>
+
+<Callout type="success">
+**READY: 1/1 for every pod.** No Envoy sidecar. No injection webhook. Cilium is enforcing mTLS and the L7 CiliumNetworkPolicy from inside the kernel.
+
+With Istio, the same cluster would show `2/2` — app container plus Envoy proxy — for every pod in the mesh.
+</Callout>
+
+---
+
+## Cilium vs Istio Comparison
+
+| Capability | Cilium | Istio |
+|---|---|---|
+| mTLS | WireGuard (node-to-node) | Envoy-to-Envoy TLS |
+| L7 policy | CiliumNetworkPolicy | AuthorizationPolicy |
+| Observability | Hubble (eBPF-native) | Kiali + Prometheus |
+| Container overhead | 0 extra containers per pod | +1 Envoy sidecar per pod |
+| Injection webhook | None | Required |
+| Traffic management | Basic | Advanced (VirtualService, retries, circuit breaking) |
+| Kernel requirement | 5.6+ (WireGuard) | None |
+
+---
+
+## Teardown
+
+```bash
+k3d cluster delete ep07-mesh
+kubectl config delete-context k3d-ep07-mesh 2>/dev/null || true
+```
+
+Or via the setup script:
+
+```bash
+./setup.sh --teardown
+```
+
+---
+
+Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)
