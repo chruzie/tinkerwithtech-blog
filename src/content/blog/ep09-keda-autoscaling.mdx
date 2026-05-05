@@ -1,0 +1,391 @@
+---
+title: "KEDA on Kubernetes: Event-Driven Autoscaling Without CPU Guesswork"
+date: "2026-03-25"
+description: "The HPA scales on CPU. But CPU isn't usually the bottleneck — queue depth is. KEDA scales on the signal that actually matters, and scales to zero when the signal goes quiet. Full k3d demo."
+season: 1
+episode: 9
+tags: ["keda", "kubernetes", "autoscaling", "hpa", "cncf", "event-driven", "scale-to-zero"]
+published: true
+---
+
+The Horizontal Pod Autoscaler scales on CPU and memory. That's fine for CPU-bound workloads. For everything else — queue consumers, event handlers, cron-driven jobs — CPU is a lagging indicator at best and uncorrelated at worst. A Kafka consumer with 50,000 messages of lag can look idle from a CPU perspective.
+
+KEDA fixes this by scaling on the signal that actually matters: queue depth, stream lag, cron windows, HTTP requests, Prometheus metrics, and 70+ other scalers. It also does something the HPA can't: scale to zero when the signal goes quiet.
+
+This post walks through a reproducible k3d demo: install KEDA, wire up a `cron` trigger, watch a deployment scale `1 → 5 → 0` on a schedule, and see the scale-to-zero path work end to end.
+
+---
+
+## HPA vs KEDA
+
+The HPA and KEDA are not competitors. KEDA *wraps* the HPA — it watches your triggers, translates them into an `External` metric, and hands that metric to an HPA it creates on your behalf.
+
+| | HPA (vanilla) | KEDA |
+|---|---|---|
+| Scales on | CPU, memory, custom metrics | 70+ scalers: Kafka, RabbitMQ, SQS, Prometheus, cron, Azure Queue, NATS, Redis, Postgres… |
+| Minimum replicas | 1 | 0 |
+| Setup for custom metrics | Custom metrics adapter, Prometheus Adapter, etc. | `ScaledObject` CRD — declarative |
+| Activation semantics | Always watching | Triggers activate/deactivate the HPA itself |
+
+The "scale to zero" part is the structurally interesting bit. The HPA can't do it because `minReplicas: 0` is invalid — the HPA needs a running pod to read metrics from. KEDA sidesteps this by *creating* and *deleting* the HPA as triggers activate and deactivate. When the trigger is inactive, no HPA exists, and nothing stops the deployment from sitting at 0.
+
+---
+
+## Architecture
+
+```
+k3d cluster: ep09-keda
+│
+├── keda namespace
+│   ├── keda-operator                  (Deployment) ← watches ScaledObjects
+│   ├── keda-operator-metrics-apiserver (Deployment) ← external metrics API
+│   └── keda-admission-webhooks        (Deployment) ← validates SO specs
+│
+└── demo namespace
+    ├── sample-app                     (Deployment, target of scaling)
+    ├── sample-app-cron                (ScaledObject — KEDA CRD)
+    └── keda-hpa-sample-app-cron       (HPA — auto-created by KEDA)
+```
+
+Three things happen when you apply a `ScaledObject`:
+
+1. The admission webhook validates the spec (trigger types exist, target exists, replica counts are sane).
+2. The operator creates an HPA named `keda-hpa-<scaledobject-name>` that references a KEDA external metric.
+3. The operator polls the trigger (cron, Kafka, Prometheus, etc.) and publishes the metric value through the external metrics API. The HPA reads that value and scales.
+
+When the trigger becomes *inactive* and `minReplicaCount: 0`, KEDA deletes the HPA and scales the deployment directly to 0.
+
+---
+
+## Prerequisites
+
+| Tool | Install |
+|------|---------|
+| `kubectl` | `brew install kubectl` |
+| `k3d` | `brew install k3d` |
+| `helm` | `brew install helm` |
+| `docker` | [docker.com/get-started](https://www.docker.com/get-started) |
+
+No cloud account. No external queue. The demo uses KEDA's `cron` scaler so everything runs locally.
+
+---
+
+## Step-by-step
+
+<Step number="1" title="Create the k3d cluster" time="~30 sec">
+
+```bash
+k3d cluster create ep09-keda \
+  --agents 1 \
+  --wait \
+  --k3s-arg "--disable=traefik@server:0"
+```
+
+<ExpectedOutput>
+```
+INFO[0000] Created image volume k3d-ep09-keda-images
+INFO[0001] Creating node 'k3d-ep09-keda-server-0'
+INFO[0001] Creating node 'k3d-ep09-keda-agent-0'
+INFO[0001] Creating LoadBalancer 'k3d-ep09-keda-serverlb'
+INFO[0002] Starting cluster 'ep09-keda'
+INFO[0016] Cluster 'ep09-keda' created successfully!
+```
+</ExpectedOutput>
+
+Traefik is disabled because KEDA doesn't need an ingress for this demo.
+
+</Step>
+
+<Step number="2" title="Install KEDA" time="~45 sec">
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update kedacore
+
+helm install keda kedacore/keda \
+  --namespace keda \
+  --create-namespace \
+  --version 2.19.0 \
+  --wait \
+  --timeout=300s \
+  --kube-context k3d-ep09-keda
+```
+
+Verify the three KEDA pods are running:
+
+```bash
+kubectl get pods -n keda --context k3d-ep09-keda
+```
+
+<ExpectedOutput>
+```
+NAME                                               READY   STATUS    RESTARTS   AGE
+keda-admission-webhooks-5d67c9bcfb-4xsxv           1/1     Running   0          33s
+keda-operator-85ff5bb446-584ht                     1/1     Running   1          33s
+keda-operator-metrics-apiserver-7ff5758fd7-z942b   1/1     Running   0          33s
+```
+</ExpectedOutput>
+
+<Callout type="info">
+The operator may show `RESTARTS: 1` on cold start — it retries until the metrics API server is healthy. This is normal.
+</Callout>
+
+Confirm the CRDs landed:
+
+```bash
+kubectl get crd --context k3d-ep09-keda | grep keda.sh
+```
+
+<ExpectedOutput>
+```
+clustertriggerauthentications.keda.sh       2026-04-22T23:43:49Z
+scaledjobs.keda.sh                          2026-04-22T23:43:49Z
+scaledobjects.keda.sh                       2026-04-22T23:43:49Z
+triggerauthentications.keda.sh              2026-04-22T23:43:49Z
+```
+</ExpectedOutput>
+
+</Step>
+
+<Step number="3" title="Deploy a sample workload" time="~20 sec">
+
+Nothing special — a plain `nginx` deployment that KEDA will scale. We start at 1 replica.
+
+```bash
+kubectl create namespace demo --context k3d-ep09-keda
+
+kubectl apply --context k3d-ep09-keda -n demo -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sample-app
+  template:
+    metadata:
+      labels:
+        app: sample-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+EOF
+
+kubectl rollout status deployment/sample-app -n demo --context k3d-ep09-keda
+```
+
+<ExpectedOutput>
+```
+namespace/demo created
+deployment.apps/sample-app created
+deployment "sample-app" successfully rolled out
+```
+</ExpectedOutput>
+
+</Step>
+
+<Step number="4" title="Apply the ScaledObject with a cron trigger" time="~5 sec">
+
+The `cron` scaler activates during a time window and sets a desired replica count. Outside the window, the trigger is inactive.
+
+Adjust the `start` / `end` fields to a window **two minutes in the future** so you can watch the scale-up live. KEDA uses standard 5-field cron syntax (minute, hour, day-of-month, month, day-of-week) in the timezone you specify.
+
+```bash
+kubectl apply --context k3d-ep09-keda -n demo -f - <<'EOF'
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: sample-app-cron
+spec:
+  scaleTargetRef:
+    name: sample-app
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 30
+  triggers:
+    - type: cron
+      metadata:
+        timezone: UTC
+        start: "51 23 * * *"     # ← replace with a near-future minute/hour
+        end:   "54 23 * * *"     # ← and closing minute/hour
+        desiredReplicas: "5"
+EOF
+```
+
+Check the `ScaledObject` and the auto-created HPA:
+
+```bash
+kubectl get scaledobject -n demo --context k3d-ep09-keda
+kubectl get hpa         -n demo --context k3d-ep09-keda
+```
+
+<ExpectedOutput>
+```
+NAME              SCALETARGETKIND      SCALETARGETNAME   MIN   MAX   READY   ACTIVE   TRIGGERS   AGE
+sample-app-cron   apps/v1.Deployment   sample-app        1     10    True    Unknown  cron       24s
+
+NAME                       REFERENCE               TARGETS     MINPODS   MAXPODS   REPLICAS
+keda-hpa-sample-app-cron   Deployment/sample-app   0/1 (avg)   1         10        1
+```
+</ExpectedOutput>
+
+The HPA `REPLICAS=1` and `TARGETS=0/1 (avg)` means the trigger is currently inactive. When the window opens, the external metric will jump and the HPA will push replicas up.
+
+</Step>
+
+<Step number="5" title="Watch the scale-up" time="~1 min to trigger, then live">
+
+```bash
+kubectl get hpa,deploy -n demo --context k3d-ep09-keda --watch
+```
+
+You'll see a transition like this across the window boundary:
+
+<ExpectedOutput>
+```
+=== 23:50:52 ===  (before window opens)
+hpa/keda-hpa-sample-app-cron   0/1 (avg)   1   10   1
+deploy/sample-app                                  1/1   1   1
+
+=== 23:51:12 ===  (window opens at 23:51, metric jumps, HPA pushes to 5)
+hpa/keda-hpa-sample-app-cron   5/1 (avg)   1   10   1
+deploy/sample-app                                  4/4   4   4
+
+=== 23:51:32 ===  (scale-up complete ~20 sec after trigger)
+hpa/keda-hpa-sample-app-cron   1/1 (avg)   1   10   5
+deploy/sample-app                                  5/5   5   5
+```
+</ExpectedOutput>
+
+The external metric value is `desiredReplicas` during the window (`5`) and `0` outside. The HPA's target is `1`, so the ratio drives the replica count. That's why `TARGETS` reads `5/1 (avg)` the moment the window opens.
+
+</Step>
+
+<Step number="6" title="Watch the scale-down" time="~5 min after window closes">
+
+When the window closes, the metric drops back to `0` and the HPA scales down — but **not immediately**. The HPA has a default scale-down stabilization window of 300 seconds (5 minutes) to avoid flapping.
+
+<ExpectedOutput>
+```
+=== 23:54:03 ===  (window closed; HPA still holding 5 during stabilization)
+hpa/keda-hpa-sample-app-cron   0/1 (avg)   1   10   5
+deploy/sample-app                                  5/5   5   5
+
+=== 23:59:27 ===  (~5 min after window closed — HPA drops to minReplicaCount)
+hpa/keda-hpa-sample-app-cron   0/1 (avg)   1   10   1
+deploy/sample-app                                  1/1   1   1
+```
+</ExpectedOutput>
+
+<Callout type="tip">
+To scale down faster, set `behavior.scaleDown.stabilizationWindowSeconds` on the `ScaledObject` spec. The default HPA behavior is appropriate for most workloads — aggressive scale-down causes pod churn when traffic is bursty.
+</Callout>
+
+</Step>
+
+<Step number="7" title="Flip to scale-to-zero" time="~5 min">
+
+This is the feature that separates KEDA from a plain HPA. Patch `minReplicaCount` to `0`:
+
+```bash
+kubectl patch scaledobject sample-app-cron \
+  -n demo \
+  --context k3d-ep09-keda \
+  --type=merge \
+  -p '{"spec":{"minReplicaCount":0}}'
+```
+
+Now that the trigger is inactive **and** `minReplicaCount: 0`, KEDA deletes the HPA and scales the deployment directly to zero:
+
+```bash
+kubectl get deploy sample-app -n demo --context k3d-ep09-keda
+```
+
+<ExpectedOutput>
+```
+NAME         READY   UP-TO-DATE   AVAILABLE   AGE
+sample-app   0/0     0            0           14m
+```
+</ExpectedOutput>
+
+Confirm it in the `ScaledObject` events:
+
+```bash
+kubectl describe scaledobject sample-app-cron -n demo --context k3d-ep09-keda | tail -10
+```
+
+<ExpectedOutput>
+```
+Events:
+  Type    Reason                      Age   From           Message
+  ----    ------                      ----  ----           -------
+  Normal  ScaledObjectReady           17m   keda-operator  ScaledObject is ready for scaling
+  Normal  KEDAScalersStarted          17m   keda-operator  Started scalers watch
+  Normal  KEDAScaleTargetDeactivated  3m    keda-operator  Deactivated apps/v1.Deployment demo/sample-app from 1 to 0
+```
+</ExpectedOutput>
+
+When the next cron window opens, KEDA re-creates the HPA and the deployment scales back up from zero.
+
+</Step>
+
+---
+
+## Beyond cron: real triggers
+
+The `cron` scaler is great for demos and for predictable-traffic workloads (business hours, weekend batch jobs). For production, most teams wire KEDA to one of these:
+
+| Trigger | Use case |
+|---------|----------|
+| `kafka` | Consumer lag — scale consumers when lag exceeds a threshold |
+| `prometheus` | Any metric you already export: requests-per-second, queue depth, custom business metric |
+| `rabbitmq` | Queue length or message rate |
+| `aws-sqs-queue` | SQS `ApproximateNumberOfMessages` |
+| `azure-servicebus` | Queue or topic subscription message count |
+| `postgresql` | Row count from an arbitrary SQL query (e.g., "pending jobs") |
+
+Swapping triggers only changes the `triggers` block of the `ScaledObject`. The target, `minReplicaCount`, `maxReplicaCount`, and cooldown stay the same. Example for Prometheus:
+
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      query: sum(rate(http_requests_total{service="sample-app"}[1m]))
+      threshold: "100"   # 100 req/s per replica
+```
+
+KEDA treats the query result as the external metric. 500 req/s → 5 replicas. 50 req/s → 1 replica. Zero requests for the cooldown period → scale to zero.
+
+---
+
+## Teardown
+
+```bash
+k3d cluster delete ep09-keda
+```
+
+That's it. The cluster, KEDA operator, and every pod it ever scaled all go away in one command.
+
+---
+
+## What's next
+
+Two places to go from here:
+
+1. **Wire KEDA to Prometheus** using the metrics pipeline from [ep04 — OpenTelemetry](/blog/ep04-opentelemetry). Scale deployments from SLO breach signals, not CPU.
+2. **Use `ScaledJob` instead of `ScaledObject`** for batch workloads. Every trigger event creates a fresh `Job` rather than scaling a `Deployment` — better for work that shouldn't be killed mid-flight.
+
+The core insight stays the same either way: stop scaling on the metric you can measure (CPU) and start scaling on the metric that actually drives your system (queue depth, request rate, or time of day).

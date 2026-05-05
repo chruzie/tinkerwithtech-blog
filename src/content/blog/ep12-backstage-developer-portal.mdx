@@ -1,0 +1,313 @@
+---
+title: "Backstage on Kubernetes: A Developer Portal That Boots in 5 Minutes"
+date: "2026-04-15"
+description: "Backstage is Spotify's open-source developer portal — a single pane for services, docs, pipelines, and tooling. Install it on k3d with the community Helm chart, no custom image required. Full reproducible demo."
+season: 1
+episode: 12
+tags: ["backstage", "kubernetes", "developer-portal", "cncf", "platform-engineering", "idp", "spotify"]
+published: true
+---
+
+Every platform team ends up rebuilding the same wiki. *"Where does service X live?"* *"Whose on-call for Y?"* *"How do I scaffold a new microservice that follows our standards?"* The answers end up sprawled across Confluence pages, Slack channels, shell scripts, and oral tradition.
+
+Backstage is Spotify's attempt to give that problem a single UI. It's a CNCF incubating project now, and it's structured as three things:
+
+1. **A software catalog** — every service, library, API, and team recorded as YAML entities, with relationships (`team X owns service Y`, `service Y calls API Z`).
+2. **Tech docs** — docs-as-code. Markdown in your repo, rendered inside Backstage with search across all your services.
+3. **Scaffolder** — templated project creation. Pick a template ("new Node service"), fill a form, Backstage creates the repo, opens the PR for CI config, registers it in the catalog.
+
+Getting the full production deploy right is a real project (custom image with your plugins, Postgres, real OAuth, GitHub App integration). But you can see the whole thing running locally in about 5 minutes — enough to decide whether it's worth the integration investment.
+
+This post installs Backstage on k3d using the community Helm chart and the upstream Docker image. No custom build. No Postgres. Fully reproducible.
+
+---
+
+## What Backstage actually is
+
+The confusion most people have on first contact: Backstage is **a framework** that gets compiled into **your custom portal**. The `npx @backstage/create-app` command scaffolds a Node.js/React app on your machine; you build it into a Docker image; you deploy that image.
+
+That's the production path. But Backstage also publishes a reference image (`ghcr.io/backstage/backstage:latest`) with no custom plugins — exactly what the scaffolder would produce with zero customization. This image is enough to see the UI, the catalog API, and the scaffolder machinery. It's what we'll use here.
+
+When you're ready to move to production, you swap the image reference and mount a real `app-config.yaml`. The rest of the Helm chart stays the same.
+
+---
+
+## Architecture
+
+```
+k3d cluster: ep12-backstage
+│
+└── backstage namespace
+    ├── backstage (Deployment, 1 replica)
+    │   └── backstage container
+    │       ├── Node.js backend (/api/*)              — port 7007
+    │       ├── Static React bundle (frontend)        — port 7007
+    │       └── SQLite DB (in-memory, non-persistent) — embedded
+    │
+    └── backstage (Service, ClusterIP, port 7007)
+```
+
+Two things worth flagging for the default chart:
+
+- **SQLite is in-memory**. Delete the pod and every catalog entity, scaffolded task, and session goes away. Production uses Postgres (`backstage.postgresql.enabled=true`).
+- **The reference image has no GitHub/GitLab/OIDC integration**. Guest sign-in is enabled so you can click into the UI. Any auth provider that needs credentials (GitHub OAuth, Okta, Google) requires an `app-config.yaml` override.
+
+---
+
+## Prerequisites
+
+| Tool | Install |
+|------|---------|
+| `kubectl` | `brew install kubectl` |
+| `k3d` | `brew install k3d` |
+| `helm` | `brew install helm` |
+| `curl` | built-in |
+| `docker` | [docker.com/get-started](https://www.docker.com/get-started) |
+
+---
+
+## Step-by-step
+
+<Step number="1" title="Create the k3d cluster" time="~30 sec">
+
+```bash
+k3d cluster create ep12-backstage \
+  --agents 1 \
+  --wait \
+  --k3s-arg "--disable=traefik@server:0"
+```
+
+<ExpectedOutput>
+```
+INFO[0018] Cluster 'ep12-backstage' created successfully!
+```
+</ExpectedOutput>
+
+</Step>
+
+<Step number="2" title="Install Backstage" time="~2 min (image pull)">
+
+```bash
+helm repo add backstage https://backstage.github.io/charts
+helm repo update backstage
+
+helm install backstage backstage/backstage \
+  --namespace backstage --create-namespace \
+  --version 2.6.3 \
+  --kube-context k3d-ep12-backstage \
+  --timeout=300s
+```
+
+<ExpectedOutput>
+```
+NAME: backstage
+LAST DEPLOYED: Wed Apr 22 18:45:01 2026
+NAMESPACE: backstage
+STATUS: deployed
+REVISION: 1
+```
+</ExpectedOutput>
+
+<Callout type="info">
+The `ghcr.io/backstage/backstage:latest` image is ~500 MB. First pull takes a minute or two on a residential connection. The chart installs without `--wait` so you can check progress while it's pulling.
+</Callout>
+
+Watch the pod come up:
+
+```bash
+kubectl get pods -n backstage --context k3d-ep12-backstage --watch
+```
+
+<ExpectedOutput>
+```
+NAME                         READY   STATUS              RESTARTS   AGE
+backstage-56bc876444-m4gqh   0/1     ContainerCreating   0          17s
+backstage-56bc876444-m4gqh   1/1     Running             0          32s
+```
+</ExpectedOutput>
+
+Once the pod is `Running`, the app needs another 20–30 seconds to initialize the SQLite DB, index the (empty) catalog, and start serving.
+
+</Step>
+
+<Step number="3" title="Verify the backend is healthy" time="~5 sec">
+
+Check the liveness endpoint from inside the cluster first to confirm the app isn't crash-looping:
+
+```bash
+kubectl logs -n backstage --context k3d-ep12-backstage deploy/backstage --tail=5
+```
+
+You should see JSON log lines like:
+
+<ExpectedOutput>
+```
+{"level":"info","message":"Collating documents for techdocs succeeded","plugin":"search","service":"backstage"}
+{"level":"info","message":"Collating documents for software-catalog succeeded","plugin":"search","service":"backstage"}
+{"level":"info","message":"\"GET /.backstage/health/v1/liveness HTTP/1.1\" 200","status":200}
+{"level":"info","message":"\"GET /.backstage/health/v1/readiness HTTP/1.1\" 200","status":200}
+```
+</ExpectedOutput>
+
+`200` on both probes means the backend is ready.
+
+</Step>
+
+<Step number="4" title="Port-forward and hit the UI" time="~10 sec">
+
+```bash
+kubectl port-forward -n backstage --context k3d-ep12-backstage \
+  svc/backstage 7007:7007 &
+```
+
+Verify the root responds with HTML and the liveness endpoint with JSON:
+
+```bash
+curl -s -o /dev/null -w "HTTP %{http_code} / %{size_download} bytes\n" \
+  http://localhost:7007/
+
+curl -s http://localhost:7007/.backstage/health/v1/liveness
+echo
+```
+
+<ExpectedOutput>
+```
+HTTP 200 / 5244 bytes
+{"status":"ok"}
+```
+</ExpectedOutput>
+
+Confirm the page is actually Backstage:
+
+```bash
+curl -s http://localhost:7007/ | grep -oE '<title>[^<]+</title>'
+```
+
+<ExpectedOutput>
+```
+<title>Scaffolded Backstage App</title>
+```
+</ExpectedOutput>
+
+Now open [http://localhost:7007](http://localhost:7007) in a browser. You'll land on the sign-in screen with a **Guest** provider. Click it — you're in, as user `guest`.
+
+</Step>
+
+<Step number="5" title="Tour the empty portal" time="as long as you like">
+
+Once signed in, the left nav shows the core plugins:
+
+- **Home** — landing page, configurable per user.
+- **APIs** — APIs registered in the catalog. Empty until you add entities.
+- **Catalog** — services, components, systems, resources. Also empty.
+- **Create** — scaffolder templates. The reference image ships with no templates.
+- **Tech Docs** — searchable docs-as-code.
+
+Hit the catalog API to confirm it's live (auth required — the response below is from the unauthenticated path, which 401s as expected):
+
+```bash
+curl -s http://localhost:7007/api/catalog/entities
+echo
+```
+
+<ExpectedOutput>
+```
+{"error":{"name":"AuthenticationError","message":"Missing credentials"},"request":{"method":"GET","url":"/entities"},"response":{"statusCode":401}}
+```
+</ExpectedOutput>
+
+A `401` is the correct response for an unauthenticated request — the API is protected. To hit it from the browser you'd need the session cookie from the guest sign-in flow. This is where a real deployment wires in OIDC or GitHub OAuth.
+
+</Step>
+
+---
+
+## Moving to production
+
+Five things change between the demo above and a real deployment. None are subtle.
+
+### 1. Build your own image
+
+The reference image has no plugins beyond the defaults. To add Kubernetes-plugin integration, AWS plugins, Datadog cards, or anything team-specific, you `npx @backstage/create-app` on your machine, `yarn install` the plugins, build the Docker image, and push it to your registry. The Helm chart then points at that image:
+
+```yaml
+backstage:
+  image:
+    registry: ghcr.io
+    repository: my-org/my-backstage
+    tag: v1.0.0
+```
+
+### 2. Real database
+
+```yaml
+backstage:
+  appConfig:
+    backend:
+      database:
+        client: pg
+        connection:
+          host: ${POSTGRES_HOST}
+          user: ${POSTGRES_USER}
+          password: ${POSTGRES_PASSWORD}
+```
+
+Postgres can be a managed RDS/CloudSQL instance or an in-cluster StatefulSet. The chart has a `postgresql.enabled=true` toggle that deploys a Bitnami Postgres sub-chart for non-production environments.
+
+### 3. Real authentication
+
+The `auth:` block in `app-config.yaml` swaps guest for a real provider. GitHub OAuth is the most common choice for engineering-centric portals:
+
+```yaml
+auth:
+  environment: production
+  providers:
+    github:
+      production:
+        clientId: ${AUTH_GITHUB_CLIENT_ID}
+        clientSecret: ${AUTH_GITHUB_CLIENT_SECRET}
+```
+
+You pair this with a GitHub App so Backstage can read repos on behalf of users — needed for the scaffolder and the catalog's `GitHub discovery` provider.
+
+### 4. Catalog entities
+
+Production catalogs don't have entities edited in the UI. They come from Git, either as individual `catalog-info.yaml` files at the root of each repo, or as a GitHub/GitLab discovery provider that crawls your org:
+
+```yaml
+catalog:
+  providers:
+    github:
+      my-org:
+        organization: my-org
+        catalogPath: /catalog-info.yaml
+```
+
+Every repo with a `catalog-info.yaml` automatically registers as a Component, API, or Resource.
+
+### 5. Secrets, not env vars
+
+The chart reads `backstage.extraEnvVarsSecrets[]` to pull sensitive values from Kubernetes Secrets. Combined with ESO ([ep10](/blog/ep10-external-secrets-vault)), you get declarative Backstage deployments with zero secrets in Git.
+
+---
+
+## Teardown
+
+```bash
+# Stop the port-forward (it's still running in the background)
+pkill -f "kubectl port-forward.*backstage"
+
+k3d cluster delete ep12-backstage
+```
+
+---
+
+## What's next
+
+Backstage is one of those tools where *installing it* is the easy 10% and *operating it* is the other 90%. The meaningful decisions are:
+
+- **What goes in the catalog?** Start with services owned by your team. Don't try to boil the ocean — a half-populated catalog is worse than no catalog because nobody trusts it. Aim for "every service has a `catalog-info.yaml` with a valid owner" before layering on APIs, libraries, or resources.
+- **Which plugins do you need?** The [Backstage plugin marketplace](https://backstage.io/plugins) has 150+. Kubernetes, PagerDuty, GitHub Actions, and Tech Docs cover most of what platform teams want. Every plugin means more code in your image and more config in your app-config — pick the ones with real user demand.
+- **How do you scale the scaffolder?** Scaffolder templates go stale fast. The most-used pattern is one template per language/framework, maintained by the platform team, with a clear owner listed in the template itself. Without an owner, the template becomes the new legacy code nobody wants to touch.
+
+The value of Backstage isn't the UI. It's the catalog — a single structured source of truth for what your organization runs. Everything else is commentary.

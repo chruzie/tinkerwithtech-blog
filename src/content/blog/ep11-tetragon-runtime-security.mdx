@@ -1,0 +1,349 @@
+---
+title: "Tetragon: eBPF Runtime Security That Actually Blocks"
+date: "2026-04-08"
+description: "Most runtime security tools log the intrusion. Tetragon stops it in-kernel with eBPF — kill the process at the syscall before userspace sees the result. Full k3d demo with detection and enforcement policies."
+season: 1
+episode: 11
+tags: ["tetragon", "cilium", "ebpf", "kubernetes", "runtime-security", "cncf", "kprobes", "admission"]
+published: true
+---
+
+Admission controllers like Kyverno ([ep06](/blog/ep06-supply-chain-security)) can block a malicious image from running. Network policies can stop exfiltration over the wire. But once a container is running with a shell inside it, traditional security tools are usually watching — not acting.
+
+Tetragon is different. It attaches eBPF programs to kernel tracepoints, LSM hooks, and kprobes. When a policy matches, Tetragon can do three things:
+
+1. **Observe** — emit a structured event with full process tree, container, and Pod context.
+2. **Audit** — same event, tagged for a SIEM.
+3. **Block** — send `SIGKILL` to the process before the syscall returns to userspace.
+
+The third one is the interesting part. Most runtime tools operate in a read-after-write mode: the syscall completed, damage is done, you get an alert. Tetragon runs inside the syscall path. By the time the `cat /etc/shadow` process returns from `security_file_permission`, it's already dead.
+
+This post sets up Tetragon on k3d, applies two policies (one observe, one enforce), and demonstrates both. Zero sidecars. Zero application changes.
+
+---
+
+## Why kernel-level matters
+
+There's a reason runtime security has historically been reactive. Userspace monitoring has fundamental blind spots:
+
+| Approach | Blind spots |
+|----------|-------------|
+| Log shipper / agent | Attacker disables the agent; logs delayed or dropped |
+| Sidecar that watches syscalls | Shared kernel namespace — attacker escapes to the node |
+| Container runtime events | Fires after the operation completes |
+| Falco (bpf driver) | Observes; policy engine in userspace still race-condition-prone for enforcement |
+
+Tetragon attaches to kernel functions directly. The eBPF program runs in-kernel at the exact moment the syscall executes its security check. There's no race window — when the policy matches, the action fires synchronously, in the same CPU context as the process that triggered it.
+
+---
+
+## Architecture
+
+```
+k3d cluster: ep11-tetragon
+│
+├── kube-system namespace
+│   └── tetragon (DaemonSet, 2 pods — one per node)
+│       ├── tetragon container        ← eBPF loader + policy engine (kernel)
+│       └── export-stdout container   ← streams events as JSON to stdout
+│
+└── default namespace
+    ├── attacker (Pod — busybox, we run kubectl exec into this)
+    └── TracingPolicies (cluster-scoped — apply to all nodes)
+```
+
+Each Tetragon pod watches only its own node. When a process on node `agent-0` triggers a policy, only the Tetragon pod on `agent-0` emits the event. In multi-node clusters, aggregate events by shipping them all to a single sink (Loki, Elastic, any SIEM).
+
+The flow for a single event:
+
+1. Process calls `cat /etc/passwd`.
+2. Kernel invokes `security_file_permission(file, mask)` as part of the LSM check.
+3. Tetragon's kprobe on that function fires. eBPF program compares `file.path` to the policy's `matchArgs` list.
+4. If matched, the program emits an event to userspace over a perf ring buffer.
+5. If the `matchActions` is `Sigkill`, the eBPF program also calls `bpf_send_signal(SIGKILL)` — the process dies before the syscall returns.
+6. The `export-stdout` container reads events from the ring buffer and emits them as JSON.
+
+---
+
+## Prerequisites
+
+| Tool | Install |
+|------|---------|
+| `kubectl` | `brew install kubectl` |
+| `k3d` | `brew install k3d` |
+| `helm` | `brew install helm` |
+| `jq` | `brew install jq` |
+| `docker` | [docker.com/get-started](https://www.docker.com/get-started) |
+
+<Callout type="info">
+Tetragon needs a kernel with BTF (BPF Type Format) — Linux 5.4+. Docker Desktop on macOS runs a modern Linux VM that satisfies this. k3d images ship with a kernel that works out of the box.
+</Callout>
+
+---
+
+## Step-by-step
+
+<Step number="1" title="Create the k3d cluster" time="~30 sec">
+
+```bash
+k3d cluster create ep11-tetragon \
+  --agents 1 \
+  --wait \
+  --k3s-arg "--disable=traefik@server:0"
+```
+
+<ExpectedOutput>
+```
+INFO[0017] Cluster 'ep11-tetragon' created successfully!
+```
+</ExpectedOutput>
+
+</Step>
+
+<Step number="2" title="Install Tetragon" time="~30 sec">
+
+```bash
+helm repo add cilium https://helm.cilium.io/
+helm repo update cilium
+
+helm install tetragon cilium/tetragon \
+  --namespace kube-system \
+  --version 1.6.1 \
+  --kube-context k3d-ep11-tetragon \
+  --wait --timeout=300s
+```
+
+Verify the DaemonSet is up:
+
+```bash
+kubectl get ds tetragon -n kube-system --context k3d-ep11-tetragon
+kubectl get pods -n kube-system --context k3d-ep11-tetragon \
+  -l app.kubernetes.io/name=tetragon
+```
+
+<ExpectedOutput>
+```
+NAME       DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   AGE
+tetragon   2         2         2       2            2           20s
+
+NAME             READY   STATUS    RESTARTS   AGE
+tetragon-ddcjf   2/2     Running   0          20s
+tetragon-kjtks   2/2     Running   0          20s
+```
+</ExpectedOutput>
+
+Each pod has two containers: the Tetragon agent (loads eBPF programs into the kernel) and `export-stdout` (streams JSON events). The node count equals the DaemonSet desired count — one Tetragon pod per node.
+
+</Step>
+
+<Step number="3" title="Apply a detection-only TracingPolicy" time="~5 sec">
+
+This policy fires on any read of `/etc/passwd` or `/etc/shadow`. Action is `Post` — event emitted, process not touched.
+
+```bash
+kubectl apply --context k3d-ep11-tetragon -f - <<'EOF'
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: file-monitoring-sensitive
+spec:
+  kprobes:
+    - call: "security_file_permission"
+      message: "Sensitive file access detected"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values:
+                - "/etc/shadow"
+                - "/etc/passwd"
+          matchActions:
+            - action: Post
+EOF
+```
+
+`security_file_permission` is a Linux Security Module (LSM) hook invoked for every file operation. It receives the file and the permission mask. By hooking here we see all accesses — `open`, `read`, memory mapping, every syscall that resolves to a file.
+
+</Step>
+
+<Step number="4" title="Deploy an attacker pod and trigger the policy" time="~20 sec">
+
+```bash
+kubectl run attacker --image=busybox:1.37 --restart=Never \
+  --context k3d-ep11-tetragon -- sleep 300
+
+kubectl wait --for=condition=Ready pod/attacker \
+  --context k3d-ep11-tetragon --timeout=60s
+
+kubectl exec --context k3d-ep11-tetragon attacker -- cat /etc/passwd | head -2
+```
+
+<ExpectedOutput>
+```
+root:x:0:0:root:/root:/bin/sh
+daemon:x:1:1:daemon:/usr/sbin:/bin/false
+```
+</ExpectedOutput>
+
+The `cat` succeeds — this policy is observe-only. But Tetragon emitted an event. Find the Tetragon pod on the same node as `attacker`:
+
+```bash
+TETRAGON_POD=$(kubectl -n kube-system --context k3d-ep11-tetragon \
+  get pod -l app.kubernetes.io/name=tetragon \
+  --field-selector=spec.nodeName=k3d-ep11-tetragon-agent-0 \
+  -o jsonpath='{.items[0].metadata.name}')
+
+kubectl logs -n kube-system --context k3d-ep11-tetragon "$TETRAGON_POD" \
+  -c export-stdout --tail=5 \
+  | jq -c 'select(.process_kprobe) | {
+      policy:  .process_kprobe.policy_name,
+      message: .process_kprobe.message,
+      action:  .process_kprobe.action,
+      bin:     .process_kprobe.process.binary,
+      args:    .process_kprobe.process.arguments,
+      pod:     .process_kprobe.process.pod.name,
+      file:    .process_kprobe.args[0].file_arg.path
+    }'
+```
+
+<ExpectedOutput>
+```
+{"policy":"file-monitoring-sensitive","message":"Sensitive file access detected","action":"KPROBE_ACTION_POST","bin":"/bin/cat","args":"/etc/passwd","pod":"attacker","file":"/etc/passwd"}
+```
+</ExpectedOutput>
+
+Every event carries the full Kubernetes identity (Pod name, namespace, labels, container image), the complete process tree (parent, grandparent, exec IDs), and the raw kernel-level arguments. Ship this to Loki or Elastic and you have structured-query forensics, not text logs.
+
+<Callout type="info">
+The same file access typically produces multiple events — one per syscall that touches `security_file_permission`. That's expected: `cat` does an `openat`, then one or more `read` calls, each of which goes through the LSM hook.
+</Callout>
+
+</Step>
+
+<Step number="5" title="Upgrade to enforcement — Sigkill" time="~5 sec">
+
+Add a second policy that blocks `/etc/shadow` reads with `action: Sigkill`:
+
+```bash
+kubectl apply --context k3d-ep11-tetragon -f - <<'EOF'
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: block-shadow-read
+spec:
+  kprobes:
+    - call: "security_file_permission"
+      message: "Blocked sensitive file read"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values:
+                - "/etc/shadow"
+          matchActions:
+            - action: Sigkill
+EOF
+```
+
+Attempt to read `/etc/shadow`:
+
+```bash
+kubectl exec --context k3d-ep11-tetragon attacker -- cat /etc/shadow
+echo "exit: $?"
+```
+
+<ExpectedOutput>
+```
+command terminated with exit code 137
+exit: 137
+```
+</ExpectedOutput>
+
+Exit code 137 is `128 + 9` — the kernel shorthand for "killed by SIGKILL." The `cat` process never got to open the file descriptor. The contents of `/etc/shadow` never hit userspace.
+
+Confirm in the event log:
+
+```bash
+kubectl logs -n kube-system --context k3d-ep11-tetragon "$TETRAGON_POD" \
+  -c export-stdout --tail=3 \
+  | jq -c 'select(.process_kprobe) | {
+      policy:  .process_kprobe.policy_name,
+      action:  .process_kprobe.action,
+      bin:     .process_kprobe.process.binary,
+      args:    .process_kprobe.process.arguments,
+      pod:     .process_kprobe.process.pod.name
+    }'
+```
+
+<ExpectedOutput>
+```
+{"policy":"block-shadow-read","action":"KPROBE_ACTION_SIGKILL","bin":"/bin/cat","args":"/etc/shadow","pod":"attacker"}
+{"policy":"file-monitoring-sensitive","action":"KPROBE_ACTION_POST","bin":"/bin/cat","args":"/etc/shadow","pod":"attacker"}
+```
+</ExpectedOutput>
+
+Both policies fire. The audit policy (`file-monitoring-sensitive`) posts an event. The enforcement policy (`block-shadow-read`) signals `SIGKILL`. Tetragon evaluates every policy — you can run detection and enforcement side by side.
+
+<Callout type="check">
+This is the structural difference from userspace tools. A Falco rule would see the `open` after it happens. Tetragon's Sigkill fires inside `security_file_permission`, which runs *during* the check — before the kernel returns a valid file descriptor to `cat`.
+</Callout>
+
+</Step>
+
+---
+
+## What else you can hook
+
+The `call:` field accepts any kernel function with BTF info. A few common ones:
+
+| Hook | Why |
+|------|-----|
+| `security_bprm_check` | Process execution — block binary names, paths, or arguments |
+| `security_socket_connect` | Outbound network — block connections to specific IPs or ports (egress firewall at process granularity) |
+| `security_sb_mount` | Mount operations — catch attempts to mount `/proc` or `/dev` |
+| `__x64_sys_setuid` | Privilege escalation — flag any UID change |
+| `tcp_connect` | All outbound TCP — paired with `matchArgs` on sockaddr |
+
+Tetragon's "standard library" of policies lives at [github.com/cilium/tetragon/tree/main/examples/tracingpolicy](https://github.com/cilium/tetragon/tree/main/examples/tracingpolicy). Copy, tune thresholds and paths, apply.
+
+---
+
+## Where Tetragon fits
+
+Tetragon is not an admission controller (use Kyverno for that — see [ep06](/blog/ep06-supply-chain-security)). It's not a network policy engine (use Cilium for that — see [ep07](/blog/ep07-istio-vs-cilium)). It runs *after* the pod has been admitted and is executing.
+
+Layer them:
+
+1. **Admission** (Kyverno) — block unsigned or non-compliant images from being scheduled.
+2. **Network** (Cilium L3/L4 + L7 policies) — restrict what the pod can talk to.
+3. **Runtime** (Tetragon) — if something still goes wrong inside the container, catch it at the syscall.
+
+Each layer shrinks the blast radius. Tetragon is the last one before the attacker reaches data.
+
+---
+
+## Teardown
+
+```bash
+k3d cluster delete ep11-tetragon
+```
+
+---
+
+## What's next
+
+- **Ship events to a real sink.** Swap the `stdout` export for a file export, then tail that file with Promtail/Vector/Fluent Bit into Loki or Elasticsearch. Every event is structured JSON with consistent keys — queries are trivial.
+- **Explore enforcement caveats.** `Sigkill` is the blunt instrument. Tetragon also has `Override` (return an error code to the syscall, letting the process continue) and `NotifyKiller` (signal a different process). For auditability, `Post` + out-of-band alerting is often better than `Sigkill` in production — you want forensics, not a process that just dies silently.
+- **Combine with Cilium.** On a Cilium-backed cluster, Tetragon policies can reference Cilium identities (labels, endpoints). The policy `matchArgs` grows a `tcp_peer` type that resolves to namespace + pod, not just IP.
