@@ -5,7 +5,7 @@ description: "Most observability stacks have three SDKs, three dashboards, and n
 season: 1
 episode: 4
 tags: ["opentelemetry", "otel", "observability", "kubernetes", "cncf", "prometheus", "grafana", "tracing", "metrics", "logs", "otlp"]
-published: false
+published: true
 ---
 
 Here's the silent tax every observability stack accumulates.
@@ -63,7 +63,7 @@ The Collector is the **central bus**. It decouples your application instrumentat
 
 ---
 
-## Setup
+## Step-by-step
 
 <Step number="1" title="Create the k3d cluster" time="~1 min">
 
@@ -296,7 +296,7 @@ The `&` runs each port-forward in the background of your current shell. They ter
 ```bash
 kubectl logs -n observability \
   -l app.kubernetes.io/name=opentelemetry-collector \
-  --context k3d-otel --tail=50
+  --context k3d-otel --tail=30
 ```
 
 <ExpectedOutput>
@@ -356,7 +356,3 @@ pkill -f "port-forward.*grafana" 2>/dev/null
 # Delete the cluster
 k3d cluster delete otel
 ```
-
----
-
-Watch on YouTube: [youtube.com/@TinkerWithTech](https://www.youtube.com/@TinkerWithTech)
