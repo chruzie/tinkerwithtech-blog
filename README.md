@@ -47,6 +47,37 @@ published: false        # flip to true when ready to release
 
 `published: false` hides the post from the episodes page. Change it to `true` and push to make it live.
 
+## Content workflow (Gemini CLI)
+
+This repo ships a Gemini CLI command that drives the whole content pipeline — topic
+research, an anti-AI blog draft, the tutorial/demo script, a dry-run validation pass, the
+website MDX, and LinkedIn copy.
+
+**Prerequisites:** [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed
+(`brew install gemini-cli`).
+
+```bash
+cd tinkerwithtech-blog
+gemini
+```
+
+Launching from the repo root auto-loads [`GEMINI.md`](GEMINI.md) (channel context + hard
+rules) and the `/content` command from `.gemini/commands/`. Drive it with a trigger:
+
+| Command | What it does |
+|---------|--------------|
+| `/content RESEARCH` | Proposes ranked CNCF topics (homelab-demosable, clear hero moment) |
+| `/content EPISODE: <topic>` | Full pipeline — writes `src/content/blog/epNN-slug.mdx` |
+| `/content BLOG ONLY: <topic>` | Just the blog tutorial |
+| `/content LINKEDIN ONLY: <topic>` | LinkedIn post + an X/Threads one-liner |
+
+It pauses at each stage for approval — reply in chat to approve or request changes, then
+fire the next trigger. Drafts are always written with `published: false`.
+
+**What stays manual:** Gemini writes the words and commands but can't touch the homelab.
+Stage 4 emits a `[VERIFY]` list of commands to run yourself (or have Claude Code execute
+the live blog walkthrough) before publishing.
+
 ## Deployment
 
 Pushes to `main` deploy automatically via GitHub Actions → GCS bucket → [blog.tinkerwithtech.io](https://blog.tinkerwithtech.io).
