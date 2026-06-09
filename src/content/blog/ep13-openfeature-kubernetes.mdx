@@ -51,7 +51,7 @@ kubectl wait --for=condition=Available deployment --all -n open-feature --timeou
 ```
 
 ### 2. Define Your Flags
-Create a `FeatureFlag` resource. This JSON structure defines the variants and which one is currently active.
+Create a `FeatureFlag` resource. This defines the variants and which one is currently active.
 
 ```yaml
 # demo-flags.yaml
@@ -60,20 +60,14 @@ kind: FeatureFlag
 metadata:
   name: app-flags
 spec:
-  managementState: managed
-  contents: |
-    {
-      "flags": {
-        "show-new-welcome": {
-          "state": "ENABLED",
-          "variants": {
-            "on": true,
-            "off": false
-          },
-          "defaultVariant": "off"
-        }
-      }
-    }
+  flagSpec:
+    flags:
+      show-new-welcome:
+        state: "ENABLED"
+        variants:
+          "on": true
+          "off": false
+        defaultVariant: "off"
 ```
 
 Apply it:
@@ -117,6 +111,8 @@ spec:
       app: demo-app
   template:
     metadata:
+      labels:
+        app: demo-app
       annotations:
         openfeature.dev/enabled: "true"
         openfeature.dev/featureflagsource: "web-flag-source"
@@ -144,7 +140,7 @@ Open `localhost:3000`. The "New Welcome" feature will be inactive. Now, flip the
 
 ```bash
 kubectl patch featureflag app-flags --type='merge' -p \
-'{"spec":{"contents":"{\"flags\":{\"show-new-welcome\":{\"state\":\"ENABLED\",\"variants\":{\"on\":true,\"off\":false},\"defaultVariant\":\"on\"}}}"}}'
+'{"spec":{"flagSpec":{"flags":{"show-new-welcome":{"defaultVariant":"on"}}}}}'
 ```
 
 Refresh the browser. The UI updates immediately. Check the pod description to confirm the app container was never restarted; only the `flagd` sidecar received the update.
