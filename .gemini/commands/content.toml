@@ -85,14 +85,16 @@ that is the HERO MOMENT. Keep total setup under ~15 minutes. List every tool + v
 the reader needs. The commands here and in the blog's Step-by-Step MUST be identical.
 
 --- STAGE 4: DRY-RUN VALIDATION (self-check before I touch the homelab) ---
-You cannot run the homelab, so do a static audit and output a checklist:
-- Does every command in the blog appear in setup.sh (and vice versa)? Flag mismatches.
+First run the deterministic static checks on the MDX you just wrote:
+  scripts/dry-run-validate.sh epNN-slug
+Read its report (frontmatter, structure, code fences, leftovers, extracted commands), then
+add the semantic audit it can't do:
 - Are there hallucinated flags, fake output, or version numbers you didn't verify?
   List each [VERIFY] item as a command I should run on the homelab.
 - Are prerequisites complete and in install order? Any missing CRD/namespace/helm repo?
-- Is teardown idempotent and does it leave no mess?
 - Does the verification step actually prove the hero moment?
 Output: "READY FOR HOMELAB" + the [VERIFY] list, or "BLOCKERS" + what to fix.
+(The dedicated /validate command runs exactly this on a finished post.)
 
 --- STAGE 5: WEBSITE CONTENT ---
 Finalize the MDX (still published: false) and produce the SEO pack:

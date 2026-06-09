@@ -14,6 +14,15 @@ dry-run validation → website MDX → LinkedIn copy). Triggers:
 - `/content BLOG ONLY: <topic>` — just the blog tutorial
 - `/content LINKEDIN ONLY: <topic>` — just the LinkedIn post
 
+Run `/validate epNN` to dry-run a finished post: it runs `scripts/dry-run-validate.sh`
+(deterministic static checks — frontmatter, structure, code fences, leftovers, command
+extraction) and then audits the commands for invented flags / fake output, emitting a
+`[VERIFY]` list. No homelab needed. You can also run the script directly:
+
+```bash
+scripts/dry-run-validate.sh ep10
+```
+
 The homelab demo and the live blog walkthrough (running every command to confirm it works)
 happen in Claude Code on the homelab, not in Gemini.
 

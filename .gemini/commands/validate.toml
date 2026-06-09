@@ -1,0 +1,34 @@
+description = "Dry-run validate a blog post before the homelab pass. Runs static checks (scripts/dry-run-validate.sh) then audits commands for hallucinations. Usage: /validate ep10"
+
+prompt = """
+You are validating a TinkerWithTech blog post WITHOUT a homelab. Two layers:
+
+LAYER 1 — deterministic static checks (already run, output below):
+
+!{bash scripts/dry-run-validate.sh {{args}}}
+
+LAYER 2 — semantic audit (your job). The script can compare structure and extract
+commands, but it cannot tell whether a command is real. Using the extracted shell
+commands above and the full MDX file at src/content/blog/{{args}}*.mdx, check:
+
+- Invented flags or subcommands — does each flag actually exist for that tool/version?
+  (e.g. a `helm install` flag that was never real, a `kubectl` subcommand that doesn't
+  exist). Flag anything you are not certain about.
+- Fabricated output — any sample output, log line, or resource status that looks made up
+  rather than what the command really prints.
+- Version numbers — chart/image/tool versions that may not exist or were yanked. Treat
+  every pinned version as [VERIFY] unless you are confident it shipped.
+- Ordering gaps — a command that needs a CRD, namespace, helm repo, or prior resource
+  that the post never creates.
+- Hero moment — does the verification step actually prove the payoff, or just check pods
+  are Running?
+
+OUTPUT:
+1. Restate the script's ✘ blockers and ! warnings in one line each (don't re-run them).
+2. A "[VERIFY] on homelab" list — exact commands I should run to confirm the uncertain
+   bits, one per line.
+3. Final verdict: "READY FOR HOMELAB" only if there are no script blockers AND no
+   high-confidence hallucinations. Otherwise "FIX FIRST" with the top 3 things to fix.
+
+Do not edit the file. Report only.
+"""

@@ -70,13 +70,28 @@ rules) and the `/content` command from `.gemini/commands/`. Drive it with a trig
 | `/content EPISODE: <topic>` | Full pipeline — writes `src/content/blog/epNN-slug.mdx` |
 | `/content BLOG ONLY: <topic>` | Just the blog tutorial |
 | `/content LINKEDIN ONLY: <topic>` | LinkedIn post + an X/Threads one-liner |
+| `/validate epNN` | Dry-run validate a finished post (static checks + hallucination audit) |
 
 It pauses at each stage for approval — reply in chat to approve or request changes, then
 fire the next trigger. Drafts are always written with `published: false`.
 
+### Dry-run validation
+
+`/validate epNN` runs [`scripts/dry-run-validate.sh`](scripts/dry-run-validate.sh) — a
+deterministic static check (frontmatter limits, required sections, balanced code fences,
+language tags, leftover placeholders, extracted shell commands) — then has Gemini audit the
+commands for invented flags, fabricated output, and unverified versions. Run the script on
+its own anytime:
+
+```bash
+scripts/dry-run-validate.sh ep10        # epNN, epNN-slug, or a path all work
+```
+
+It exits non-zero on hard blockers, so it also works in CI or a pre-commit hook.
+
 **What stays manual:** Gemini writes the words and commands but can't touch the homelab.
-Stage 4 emits a `[VERIFY]` list of commands to run yourself (or have Claude Code execute
-the live blog walkthrough) before publishing.
+Stage 4 (and `/validate`) emits a `[VERIFY]` list of commands to run yourself (or have
+Claude Code execute the live blog walkthrough) before publishing.
 
 ## Deployment
 
