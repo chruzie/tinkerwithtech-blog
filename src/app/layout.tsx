@@ -62,12 +62,18 @@ export default function RootLayout({
 
         {/* Ko-fi Widget */}
         <Script
-          src="https://storage.ko-fi.com/cdn/widget/Widget_2.js"
+          src="https://storage.ko-fi.com/cdn/scripts/overlay-widget.js"
           strategy="afterInteractive"
         />
         <Script id="kofi-widget" strategy="afterInteractive">
-          {`kofiwidget2.init('Support me on Ko-fi', '#ff6501', 'Y8Y51KQK8E');
-          kofiwidget2.draw();`}
+          {`
+            kofiWidgetOverlay.draw('chruzie', {
+              'type': 'floating-chat',
+              'floating-chat.donateButton.text': 'Support me',
+              'floating-chat.donateButton.background-color': '#ff6501',
+              'floating-chat.donateButton.text-color': '#fff'
+            });
+          `}
         </Script>
       </body>
     </html>

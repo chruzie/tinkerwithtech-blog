@@ -1,0 +1,132 @@
+---
+title: "Kubernetes Pod Costs with OpenCost"
+date: "2026-06-08"
+description: "Map resource usage to dollar values. Use OpenCost and Prometheus to get a real-time dollar-per-hour breakdown of your cluster spend."
+season: 1
+episode: 14
+tags: ["kubernetes", "opencost", "finops", "sre", "cost-management"]
+published: true
+---
+
+Cloud bills are usually an mystery, arriving weeks after a resource leak has already drained the budget. Standard Kubernetes metrics show CPU and memory usage, but they don't translate those numbers into dollars. Without a direct link between resource consumption and cost, platform teams struggle to justify infrastructure spend or hold internal teams accountable.
+
+OpenCost fills this gap by mapping real-time resource usage to a dollar value. It integrates with your existing Prometheus stack to provide a granular, pod-level breakdown of your cluster spend.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3d is fine)
+- Helm 3 and kubectl
+- Prometheus installed (we will install a minimal instance)
+
+```bash
+# Setup cluster
+k3d cluster create opencost-demo --wait
+```
+
+## Architecture Overlay
+
+OpenCost leverages your existing monitoring data. The OpenCost exporter queries Prometheus for CPU, RAM, and storage metrics. It then applies a pricing sheet to calculate cost. It exposes these metrics as a new Prometheus target and provides a dedicated CLI for real-time inspection.
+
+## Step-by-Step Implementation
+
+### 1. Install Prometheus
+If you don't have Prometheus, install the community stack. OpenCost requires this as its data source.
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+# Install a minimal Prometheus instance
+helm install prometheus prometheus-community/prometheus \
+  --namespace prometheus-system --create-namespace \
+  --set alertmanager.enabled=false \
+  --set pushgateway.enabled=false \
+  --set server.persistentVolume.enabled=false
+
+# Wait for rollout
+kubectl wait --for=condition=Available deployment --all -n prometheus-system --timeout=300s
+```
+
+### 2. Install OpenCost
+Point OpenCost to your Prometheus service. Note the `internal.enabled=false` flag; this is required when using an external Prometheus instance.
+
+```bash
+helm repo add opencost https://opencost.github.io/opencost-helm-chart
+helm repo update
+
+# Deploy OpenCost
+helm install opencost opencost/opencost \
+  --namespace opencost --create-namespace \
+  --set opencost.prometheus.internal.enabled=false \
+  --set opencost.prometheus.external.enabled=true \
+  --set opencost.prometheus.external.url=http://prometheus-server.prometheus-system.svc.cluster.local \
+  --set opencost.ui.enabled=true
+```
+
+### 3. Install the kubectl-cost CLI
+The UI is good for dashboards, but SREs need terminal-first visibility.
+
+```bash
+# Download for Mac/Linux (adjust architecture as needed)
+# For Mac ARM64:
+curl -s -L https://github.com/kubecost/kubectl-cost/releases/latest/download/kubectl-cost-darwin-arm64.tar.gz | tar xz
+chmod +x kubectl-cost
+sudo mv kubectl-cost /usr/local/bin/
+```
+
+### 4. Apply a "Leaky" Workload
+Deploy a pod with high resource requests to see the cost engine react.
+
+```yaml
+# leaky-app.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leaky-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: leaky-app
+  template:
+    metadata:
+      labels:
+        app: leaky-app
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: "1"
+            memory: "1Gi"
+```
+
+Apply it:
+```bash
+kubectl apply -f leaky-app.yaml
+```
+
+## POC / Verification
+
+Wait at least 3 minutes. Prometheus needs multiple scrape intervals for OpenCost to calculate an accurate hourly rate.
+
+Run the CLI:
+```bash
+kubectl cost namespace --opencost
+```
+
+**HERO MOMENT:**
+The output shows a real-time dollar-per-hour cost (projected to monthly) for every namespace, including the one you just bloated.
+
+```text
++-----------------+-------------------+--------------------+-----------------+
+| CLUSTER         | NAMESPACE         | MONTHLY RATE (ALL) | COST EFFICIENCY |
++-----------------+-------------------+--------------------+-----------------+
+| default-cluster | default           |          51.658105 |        0.000048 |
+|                 | kube-system       |           4.965266 |        0.049760 |
+|                 | opencost          |           0.776136 |        0.205710 |
++-----------------+-------------------+--------------------+-----------------+
+```
+
+[VERIFY] Check the `default` namespace row. If the monthly rate is >$50, OpenCost is successfully mapping your CPU/RAM requests to your budget.

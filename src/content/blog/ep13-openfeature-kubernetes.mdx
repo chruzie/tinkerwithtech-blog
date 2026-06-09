@@ -1,0 +1,155 @@
+---
+title: "Kubernetes Feature Flags with OpenFeature"
+date: "2026-06-08"
+description: "Decouple code from releases. Use the OpenFeature Operator to manage application behavior via CRDs without pod restarts."
+season: 1
+episode: 13
+tags: ["kubernetes", "openfeature", "gitops", "platform-engineering"]
+published: true
+---
+
+Deploying code is not the same as releasing a feature. When you tie the two together, a single bug in a new UI component forces a full rollback of the entire service. Traditional environment variables require pod restarts to change behavior, introducing latency and risk during high-traffic windows.
+
+OpenFeature solves this by standardizing feature management through a vendor-neutral API. By using the OpenFeature Operator, you treat feature flags as first-class Kubernetes objects. You can flip a switch in a Custom Resource and see your application update instantly, zero restarts required.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3d recommended)
+- Helm and kubectl installed
+- cert-manager (required for operator webhooks)
+
+```bash
+# Setup script for local validation
+# [VERIFY] Ensure k3d is installed and the context is set
+k3d cluster create openfeature-demo --wait
+```
+
+## Architecture Overlay
+
+The OpenFeature Operator automates the sidecar pattern. You define a `FeatureFlag` CRD containing your JSON rules. The Operator then injects a `flagd` sidecar into your application pods. This sidecar watches the Kubernetes API for changes and serves flag values to your app over gRPC on localhost, ensuring sub-millisecond evaluation without external network calls.
+
+## Step-by-Step Implementation
+
+### 1. Install the Operator
+The operator requires cert-manager to handle its internal webhooks.
+
+```bash
+# Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.0/cert-manager.yaml
+
+# [VERIFY] Wait for cert-manager to be ready
+kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=120s
+
+# Install OpenFeature Operator
+helm repo add openfeature https://open-feature.github.io/open-feature-operator/
+helm repo update
+helm upgrade --install open-feature-operator openfeature/open-feature-operator \
+  --namespace open-feature --create-namespace
+
+# [VERIFY] Wait for operator to be ready
+kubectl wait --for=condition=Available deployment --all -n open-feature --timeout=120s
+```
+
+### 2. Define Your Flags
+Create a `FeatureFlag` resource. This JSON structure defines the variants and which one is currently active.
+
+```yaml
+# demo-flags.yaml
+apiVersion: core.openfeature.dev/v1beta1
+kind: FeatureFlag
+metadata:
+  name: app-flags
+spec:
+  managementState: managed
+  contents: |
+    {
+      "flags": {
+        "show-new-welcome": {
+          "state": "ENABLED",
+          "variants": {
+            "on": true,
+            "off": false
+          },
+          "defaultVariant": "off"
+        }
+      }
+    }
+```
+
+Apply it:
+```bash
+kubectl apply -f demo-flags.yaml
+```
+
+### 3. Connect the Source
+A `FeatureFlagSource` tells the operator which pods should receive which flags.
+
+```yaml
+# flag-source.yaml
+apiVersion: core.openfeature.dev/v1beta1
+kind: FeatureFlagSource
+metadata:
+  name: web-flag-source
+spec:
+  sources:
+    - source: default/app-flags
+      provider: kubernetes
+```
+
+Apply it:
+```bash
+kubectl apply -f flag-source.yaml
+```
+
+### 4. Deploy the App
+Annotate your deployment. The operator sees `openfeature.dev/enabled: "true"` and automatically injects the `flagd` sidecar.
+
+```yaml
+# app-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      annotations:
+        openfeature.dev/enabled: "true"
+        openfeature.dev/featureflagsource: "web-flag-source"
+    spec:
+      containers:
+      - name: app
+        image: ghcr.io/open-feature/playground-app:latest
+        ports:
+        - containerPort: 3000
+```
+
+Apply it:
+```bash
+kubectl apply -f app-deployment.yaml
+```
+
+## POC / Verification
+
+Forward the port to view the application:
+```bash
+kubectl port-forward svc/demo-app 3000:3000
+```
+
+Open `localhost:3000`. The "New Welcome" feature will be inactive. Now, flip the flag in-place:
+
+```bash
+kubectl patch featureflag app-flags --type='merge' -p \
+'{"spec":{"contents":"{\"flags\":{\"show-new-welcome\":{\"state\":\"ENABLED\",\"variants\":{\"on\":true,\"off\":false},\"defaultVariant\":\"on\"}}}"}}'
+```
+
+Refresh the browser. The UI updates immediately. Check the pod description to confirm the app container was never restarted; only the `flagd` sidecar received the update.
+
+```bash
+# [VERIFY] This should return 0, proving no pod restart occurred
+kubectl get pods -l app=demo-app -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
+```
