@@ -7,28 +7,29 @@ CNCF engineering through short, demo-driven tutorials. Posts live in
 ## Content workflow
 
 Run `/content` to drive the full content pipeline (research → anti-AI blog → tutorial →
-dry-run validation → website MDX → LinkedIn copy). Triggers:
+live validation → website MDX → LinkedIn copy). Triggers:
 
 - `/content RESEARCH` — propose ranked CNCF episode topics
 - `/content EPISODE: <topic or tool>` — full pipeline for a chosen topic
 - `/content BLOG ONLY: <topic>` — just the blog tutorial
 - `/content LINKEDIN ONLY: <topic>` — just the LinkedIn post
 
-Run `/validate epNN` to dry-run a finished post: it runs `scripts/dry-run-validate.sh`
-(deterministic static checks — frontmatter, structure, code fences, leftovers, command
-extraction) and then audits the commands for invented flags / fake output, emitting a
-`[VERIFY]` list. No homelab needed. You can also run the script directly:
+### Validation Requirements
 
-```bash
-scripts/dry-run-validate.sh ep10
-```
+1. **Dry-Run:** Run `/validate epNN` for deterministic static checks (frontmatter, structure,
+   code fences).
+2. **Live Validation:** Before finalization, the producer MUST attempt to execute every 
+   command in the tutorial on a local `k3d` or `vCluster` instance. Identify and fix 
+   hallucinated flags, schema mismatches, or timing issues during this phase.
 
-The homelab demo and the live blog walkthrough (running every command to confirm it works)
-happen in Claude Code on the homelab, not in Gemini.
+The LIVE blog walkthrough (running every command to confirm it works) must pass 
+end-to-end before the post is marked as "ready for publishing".
 
 ## Hard rules for any blog post
 
 - **Frontmatter** always sets `published: false`. Flip to `true` + git push to release.
+- **Mandatory Live Validation:** No tutorial is complete until the producer has verified 
+  the "hero moment" on a local Kubernetes instance.
 - Post structure: Introduction → Prerequisites → Architecture Overlay → Step-by-Step
   Implementation → POC/Verification.
 - Code blocks always specify a language (`bash`, `yaml`, `json`, `go`, `hcl`).
