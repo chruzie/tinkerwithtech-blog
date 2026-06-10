@@ -1,0 +1,89 @@
+---
+title: "Production Postgres on Kubernetes: CloudNativePG"
+date: "2026-06-09"
+description: "Run self-healing, high-availability Postgres clusters without a DBA. Use the CloudNativePG operator for cloud-native database management."
+season: 1
+episode: 17
+tags: ["kubernetes", "postgres", "cloudnativepg", "database"]
+published: false
+---
+
+Running databases on Kubernetes was once considered a "don't do this" scenario. State management, failover, and backups are complex tasks that standard Deployments aren't designed to handle. However, the Operator pattern has changed the equation. You no longer need a dedicated DBA to manage your clusters if the operational knowledge is baked into the controller.
+
+CloudNativePG is a Kubernetes-native operator for PostgreSQL. It doesn't rely on external tools like Patroni; instead, it uses the Kubernetes API to manage replication, failover, and scaling. It treats the database like any other workload.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3d recommended)
+- Helm 3 and kubectl
+
+```bash
+# Setup cluster
+k3d cluster create cnp-demo --wait
+```
+
+## Architecture Overlay
+
+CloudNativePG uses a primary-standby architecture. The operator manages a set of Pods, each running a Postgres instance. It handles the initial bootstrap, sets up streaming replication, and continuously monitors health. If the primary node fails, the operator automatically promotes the most up-to-date standby to primary and reconfigures the other replicas to follow the new master.
+
+## Step-by-Step Implementation
+
+### 1. Install the Operator
+Deploy the controller that will manage your database clusters.
+
+```bash
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm repo update
+
+helm install cnpg cnpg/cloudnative-pg \
+  --namespace cnpg-system --create-namespace
+```
+
+### 2. Deploy an HA Cluster
+Define a 3-node cluster with automated failover and local storage.
+
+```yaml
+# cluster.yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-db
+spec:
+  instances: 3
+  storage:
+    size: 1Gi
+```
+
+Apply it:
+```bash
+kubectl apply -f cluster.yaml
+```
+
+### 3. Verify Replication
+The operator creates a primary and two standbys.
+
+```bash
+kubectl get pods -l cnpg.io/cluster=my-db
+```
+
+## POC / Verification
+
+The confirmation of high availability is killing the primary and watching the cluster self-heal without manual intervention.
+
+Identify the primary pod:
+```bash
+kubectl get cluster my-db -o jsonpath='{.status.currentPrimary}'
+```
+
+Delete the primary pod:
+```bash
+PRIMARY_POD=$(kubectl get cluster my-db -o jsonpath='{.status.currentPrimary}')
+kubectl delete pod $PRIMARY_POD
+```
+
+Watch the status:
+```bash
+kubectl get cluster my-db -w
+```
+
+Within seconds, you will see a standby promoted to primary. The operator then spins up a new standby to bring the instance count back to 3. You've achieved high availability with a single YAML file.

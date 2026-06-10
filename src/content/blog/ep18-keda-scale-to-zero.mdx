@@ -1,0 +1,99 @@
+---
+title: "Scale to Zero with KEDA"
+date: "2026-06-09"
+description: "Don't pay for idle pods. Use KEDA to scale your Kubernetes workloads based on external events like queue depth or prometheus metrics."
+season: 1
+episode: 18
+tags: ["kubernetes", "keda", "autoscaling", "serverless"]
+published: false
+---
+
+The standard Kubernetes Horizontal Pod Autoscaler (HPA) reacts to CPU and memory—lagging indicators that only fire after your system is already under load. For event-driven workers, resource usage isn't the signal; the length of the queue is.
+
+KEDA (Kubernetes Event-Driven Autoscaling) brings serverless scaling to your cluster. It can scale your workloads based on over 60 external event sources, including the ability to scale down to zero when there is no work to do.
+
+## Prerequisites
+
+- A Kubernetes cluster
+- Helm 3
+
+```bash
+# Setup cluster
+k3d cluster create keda-demo --wait
+```
+
+## Architecture Overlay
+
+KEDA works alongside the HPA. It acts as a metrics adapter that feeds external event data into the Kubernetes scaling engine. When KEDA sees an event (e.g., a message in a queue), it scales the deployment from 0 to 1. From there, the standard HPA takes over to scale up further based on the custom metrics KEDA provides.
+
+## Step-by-Step Implementation
+
+### 1. Install KEDA
+Deploy the KEDA operator and its metrics server.
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+
+helm install keda kedacore/keda \
+  --namespace keda --create-namespace
+```
+
+### 2. Define a ScaledObject
+This resource tells KEDA which deployment to scale and what the trigger is. We'll use a `cron` trigger for this demo to simulate scheduled work.
+
+```yaml
+# scaledobject.yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: cron-scaled-app
+spec:
+  scaleTargetRef:
+    name: worker-app
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  triggers:
+  - type: cron
+    metadata:
+      timezone: UTC
+      start: "0 * * * *" # Scale up at the start of every hour
+      end: "30 * * * *"   # Scale down after 30 mins
+      desiredReplicas: "3"
+```
+
+### 3. Deploy the Worker
+Deploy a simple app that starts at 0 replicas.
+
+```yaml
+# worker.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-app
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: worker-app
+  template:
+    metadata:
+      labels:
+        app: worker-app
+    spec:
+      containers:
+      - name: worker
+        image: busybox
+        command: ["sh", "-c", "while true; do echo 'working...'; sleep 10; done"]
+```
+
+## POC / Verification
+
+The visual confirmation of scale-to-zero is seeing `kubectl get pods` return nothing, then automatically spinning up replicas when the trigger activates.
+
+Initially, no pods will be running:
+```bash
+kubectl get pods -l app=worker-app
+```
+
+When the cron window hits, KEDA will scale the deployment to 3 replicas automatically. Once the window closes, it returns to zero. You've eliminated the cost of idle workers while ensuring your system stays responsive to real-world schedules.
