@@ -1,0 +1,71 @@
+---
+title: "Kubernetes Networking with Cilium eBPF"
+date: "2026-06-09"
+description: "Replace standard iptables with eBPF. Use Cilium to visualize network flows and secure your cluster without sidecars."
+season: 1
+episode: 19
+tags: ["kubernetes", "networking", "cilium", "ebpf"]
+published: false
+---
+
+Traditional Kubernetes networking relies on `iptables`, a technology built for static firewalls, not dynamic container environments. As clusters grow, `iptables` rules become a performance bottleneck and a debugging nightmare. You can't easily see which pod is talking to what without adding heavy sidecars or complex service mesh overlays.
+
+Cilium uses eBPF (Extended Berkeley Packet Filter) to hook directly into the Linux kernel. This allows it to handle networking, security, and observability at the kernel level, providing near-native performance and deep visibility into every packet without touching your application code.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3d works, but we need to disable the default CNI)
+- Helm 3 and the Cilium CLI
+
+```bash
+# Setup cluster without default CNI
+k3d cluster create cilium-demo --wait --k3s-arg '--flannel-backend=none@server:*' --k3s-arg '--disable-network-policy@server:*'
+```
+
+## Architecture Overlay
+
+Cilium replaces the standard CNI (Container Network Interface). It runs an agent on every node that compiles and loads eBPF programs into the kernel. These programs intercept network events at the socket level, providing high-efficiency routing and real-time observability via Hubble, Cilium's distributed networking and security observability platform.
+
+## Step-by-Step Implementation
+
+### 1. Install Cilium
+The Cilium CLI is the fastest way to handle the installation and health checks.
+
+```bash
+cilium install --version 1.15.5
+```
+
+Wait for the installation to finish:
+```bash
+cilium status --wait
+```
+
+### 2. Enable Hubble
+Hubble provides the UI and CLI for visualizing your network traffic.
+
+```bash
+cilium hubble enable --ui
+```
+
+### 3. Deploy a Connectivity Test
+Deploy some sample workloads to generate traffic that we can visualize.
+
+```bash
+cilium connectivity test
+```
+
+## POC / Verification
+
+The confirmation of Cilium's power is seeing live, kernel-level traffic flows.
+
+Open the Hubble UI:
+```bash
+cilium hubble ui
+```
+
+Access the UI at `localhost:12000`. You will see a real-time graphical map of every service in your cluster and how they are communicating. You can click on any flow to see the full metadata, including whether it was allowed or denied by a security policy, all without a single sidecar proxy.
+
+Check the CLI output for real-time flows:
+```bash
+cilium hubble observe --follow
+```

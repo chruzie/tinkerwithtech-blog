@@ -1,0 +1,76 @@
+---
+title: "Runtime Security with Falco"
+date: "2026-06-09"
+description: "Detect suspicious activity in real-time. Use Falco to monitor system calls and alert on container escapes or unauthorized access."
+season: 1
+episode: 20
+tags: ["kubernetes", "security", "falco", "runtime"]
+published: false
+---
+
+Vulnerability scanning in your CI/CD pipeline only solves half the problem. It tells you if your images are vulnerable, but it doesn't tell you if a running container has been compromised. Once an attacker is inside a pod, they will try to escalate privileges, read sensitive files like `/etc/shadow`, or open a reverse shell.
+
+Falco is the CNCF standard for runtime security. It monitors system calls at the kernel level and matches them against a set of security rules. If a container does something it shouldn't, Falco fires an alert instantly.
+
+## Prerequisites
+
+- A Kubernetes cluster
+- Helm 3
+
+```bash
+# Setup cluster
+k3d cluster create falco-demo --wait
+```
+
+## Architecture Overlay
+
+Falco runs as a DaemonSet across your cluster. It uses a kernel module or an eBPF probe to intercept system calls. It then streams these events through its rules engine. Unlike log-based security, Falco sees what the process is actually *doing* in the kernel, making it nearly impossible for an attacker to hide their tracks.
+
+## Step-by-Step Implementation
+
+### 1. Install Falco
+We'll use the Helm chart to deploy Falco with its default security rules.
+
+```bash
+helm repo add falcosecurity https://falcosecurity.github.io/charts
+helm repo update
+
+helm install falco falcosecurity/falco \
+  --namespace falco --create-namespace \
+  --set tty=true
+```
+
+### 2. Verify Rule Loading
+Falco comes with a massive set of community-maintained rules for detecting common attacks.
+
+```bash
+kubectl logs -n falco -l app.kubernetes.io/name=falco | grep "Loaded rules"
+```
+
+### 3. Trigger a Security Alert
+Try to do something "suspicious," like opening a shell in a running pod and touching a sensitive file.
+
+```bash
+# Run a dummy pod
+kubectl run secure-pod --image=nginx
+
+# Exec into it (this triggers an alert)
+kubectl exec -it secure-pod -- sh
+
+# Inside the pod:
+cat /etc/shadow
+```
+
+## POC / Verification
+
+The visual confirmation of Falco is seeing a real-time security alert firing in the logs.
+
+Check the Falco logs:
+```bash
+kubectl logs -n falco -l app.kubernetes.io/name=falco | grep "Notice"
+```
+
+You will see an entry similar to:
+`Notice A shell was spawned in a container with an attached terminal (user=root container_id=... image=nginx)`
+
+Falco provides the "who, what, where" for every suspicious event, giving your SRE team the data they need to respond to a breach before it spreads.
