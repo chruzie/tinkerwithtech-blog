@@ -1,0 +1,45 @@
+apiVersion: core.openfeature.dev/v1beta1
+kind: FeatureFlag
+metadata:
+  name: app-flags
+spec:
+  flagSpec:
+    flags:
+      show-new-welcome:
+        state: "ENABLED"
+        variants:
+          "on": true
+          "off": false
+        defaultVariant: "off"
+---
+apiVersion: core.openfeature.dev/v1beta1
+kind: FeatureFlagSource
+metadata:
+  name: web-flag-source
+spec:
+  sources:
+    - source: default/app-flags
+      provider: kubernetes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+      annotations:
+        openfeature.dev/enabled: "true"
+        openfeature.dev/featureflagsource: "web-flag-source"
+    spec:
+      containers:
+      - name: app
+        image: ghcr.io/open-feature/playground-app:latest
+        ports:
+        - containerPort: 3000
