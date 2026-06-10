@@ -109,15 +109,14 @@ kubectl apply -f leaky-app.yaml
 
 ## POC / Verification
 
-Wait at least 3 minutes. Prometheus needs multiple scrape intervals for OpenCost to calculate an accurate hourly rate.
+Prometheus requires multiple scrape intervals for OpenCost to calculate an accurate hourly rate. Wait at least 3 minutes before running the first query.
 
 Run the CLI:
 ```bash
 kubectl cost namespace --opencost
 ```
 
-**HERO MOMENT:**
-The output shows a real-time dollar-per-hour cost (projected to monthly) for every namespace, including the one you just bloated.
+The output displays a real-time dollar-per-hour cost (projected to a monthly rate) for every namespace in the cluster.
 
 ```text
 +-----------------+-------------------+--------------------+-----------------+
@@ -129,4 +128,4 @@ The output shows a real-time dollar-per-hour cost (projected to monthly) for eve
 +-----------------+-------------------+--------------------+-----------------+
 ```
 
-[VERIFY] Check the `default` namespace row. If the monthly rate is >$50, OpenCost is successfully mapping your CPU/RAM requests to your budget.
+If the `default` namespace shows a significant monthly rate, OpenCost has successfully mapped your container resource requests to the pricing model.

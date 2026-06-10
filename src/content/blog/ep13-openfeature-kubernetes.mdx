@@ -136,16 +136,16 @@ Forward the port to view the application:
 kubectl port-forward svc/demo-app 3000:3000
 ```
 
-Open `localhost:3000`. The "New Welcome" feature will be inactive. Now, flip the flag in-place:
+Open `localhost:3000`. The "New Welcome" feature is inactive by default. Flip the flag in-place:
 
 ```bash
 kubectl patch featureflag app-flags --type='merge' -p \
 '{"spec":{"flagSpec":{"flags":{"show-new-welcome":{"defaultVariant":"on"}}}}}'
 ```
 
-Refresh the browser. The UI updates immediately. Check the pod description to confirm the app container was never restarted; only the `flagd` sidecar received the update.
+Refresh the browser. The UI updates immediately. The application container remains running without a restart; only the `flagd` sidecar processed the configuration change.
 
 ```bash
-# [VERIFY] This should return 0, proving no pod restart occurred
+# Verify no pod restart occurred
 kubectl get pods -l app=demo-app -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'
 ```
