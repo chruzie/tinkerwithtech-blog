@@ -1,0 +1,99 @@
+---
+title: "Kubernetes Policy without Rego: Kyverno"
+date: "2026-06-09"
+description: "Secure your cluster with YAML. Use Kyverno to enforce security best practices without learning a new DSL."
+season: 1
+episode: 16
+tags: ["kubernetes", "security", "kyverno", "policy-as-code"]
+published: false
+---
+
+Governance in Kubernetes is often seen as a choice between "trust" and "Rego." While OPA/Gatekeeper is powerful, its domain-specific language (DSL) has a steep learning curve that discourages many teams from writing their own policies. SREs already know YAML; forcing them to learn a complex functional language just to block privileged containers is a bottleneck for security.
+
+Kyverno is a Kubernetes-native policy engine that uses standard YAML declarations. It can validate, mutate, and generate resources across your cluster. If you can write a Deployment, you can write a Kyverno policy.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3d is fine)
+- Helm 3 and kubectl
+
+```bash
+# Setup cluster
+k3d cluster create kyverno-demo --wait
+```
+
+## Architecture Overlay
+
+Kyverno runs as a Dynamic Admission Controller. When a request hits the Kubernetes API, the API server sends an AdmissionReview to Kyverno. Kyverno matches the request against your `ClusterPolicy` resources. It then returns an "allow" or "deny" response. Unlike OPA, Kyverno is specifically designed for Kubernetes objects, so it understands the relationship between things like Pods and their parent Deployments natively.
+
+## Step-by-Step Implementation
+
+### 1. Install Kyverno
+The standard Helm installation is the recommended path for production.
+
+```bash
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm repo update
+
+helm install kyverno kyverno/kyverno \
+  --namespace kyverno --create-namespace
+```
+
+### 2. Block Privileged Containers
+This policy ensures that no pod can run with `privileged: true`, which is one of the most common vectors for container escapes.
+
+```yaml
+# disallow-privileged.yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged-containers
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-privileged
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: "Privileged containers are not allowed."
+      pattern:
+        spec:
+          containers:
+          - securityContext:
+              privileged: false
+```
+
+Apply the policy:
+```bash
+kubectl apply -f disallow-privileged.yaml
+```
+
+### 3. Test the Policy
+Try to deploy a pod that breaks the rule.
+
+```bash
+kubectl run evil-pod --image=nginx --privileged
+```
+
+The API server will reject the request with a message confirming that the Kyverno policy blocked the admission.
+
+## POC / Verification
+
+The native Kubernetes API blocking a request based on your custom YAML rule is the confirmation that your policy is active.
+
+Check the policy status:
+```bash
+kubectl get clusterpolicy
+```
+
+Verify that a non-privileged pod still works:
+```bash
+kubectl run good-pod --image=nginx
+kubectl get pods good-pod
+```
+
+You have successfully enforced a security standard across your entire cluster using nothing but the language you already use for deployments.

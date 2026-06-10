@@ -1,0 +1,86 @@
+---
+title: "Kubernetes Multi-Tenancy with vCluster"
+date: "2026-06-09"
+description: "Isolation without the overhead. Use vCluster to create virtual Kubernetes clusters that run as pods inside your existing cluster."
+season: 1
+episode: 15
+tags: ["kubernetes", "vcluster", "platform-engineering", "multi-tenancy"]
+published: false
+---
+
+Giving every developer a dedicated Kubernetes cluster is the ideal for isolation, but it quickly becomes an operational and financial nightmare. Managing dozens of separate control planes, nodes, and networking stacks introduces massive overhead. Standard namespace isolation often isn't enough when teams need to install their own CRDs or global operators.
+
+vCluster solves this by providing virtual clusters that run as a single pod inside a "host" cluster. Each virtual cluster has its own API server and data store, but shares the underlying nodes of the host. Developers get full `cluster-admin` rights in their sandbox without the cost of real infrastructure.
+
+## Prerequisites
+
+- A Kubernetes cluster (k3d recommended)
+- The vCluster CLI installed
+- Helm 3 and kubectl
+
+```bash
+# [VERIFY] Install vCluster CLI if missing (Mac ARM64)
+# curl -L -o vcluster "https://github.com/loft-sh/vcluster/releases/latest/download/vcluster-darwin-arm64" && chmod +x vcluster && sudo mv vcluster /usr/local/bin/
+```
+
+## Architecture Overlay
+
+vCluster implements a "shadow" control plane. When you create a vCluster, it deploys a pod containing an API server and a state store (usually K3s). This control plane manages its own objects (Namespaces, CRDs, Pods) which are then synchronized down to the host cluster's namespace. The host sees only pods; the tenant sees a full, empty Kubernetes cluster.
+
+## Step-by-Step Implementation
+
+### 1. Initialize the Host
+Create a namespace to house your first virtual cluster.
+
+```bash
+kubectl create namespace team-alpha
+```
+
+### 2. Create the Virtual Cluster
+Use the vCluster CLI to spin up a new instance. This command handles the Helm installation and automatically connects your current `kubeconfig` to the new virtual API.
+
+```bash
+vcluster create my-vcluster -n team-alpha
+```
+
+### 3. Verify Isolation
+Once connected, your `kubectl` context points to the virtual cluster. Global resources like CRDs or Namespaces created here do not exist on the host.
+
+```bash
+# Create a namespace inside the vcluster
+kubectl create namespace virtual-only
+
+# Try to find it on the host (it won't be there)
+vcluster disconnect
+kubectl get ns virtual-only
+```
+
+### 4. Deploy a Custom Operator
+Because you have `cluster-admin` in the vCluster, you can install operators that would normally conflict with other teams on the same host.
+
+```bash
+# Connect back
+vcluster connect my-vcluster -n team-alpha
+
+# Install a sample CRD (e.g., Cert-Manager CRDs or similar)
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.0/cert-manager.crds.yaml
+```
+
+## POC / Verification
+
+The definitive proof of vCluster is seeing a "cluster-within-a-pod."
+
+Run `kubectl get nodes` inside the vCluster. You will see a single virtual node representing the host's capacity. Now, look at the host cluster:
+
+```bash
+vcluster disconnect
+kubectl get pods -n team-alpha
+```
+
+The `vcluster` pod runs the entire control plane. Any pods you deployed inside the virtual cluster appear as regular pods in the `team-alpha` namespace on the host. The host remains clean, while the tenant has full autonomy.
+
+```bash
+# Final check: connect and verify version
+vcluster connect my-vcluster -n team-alpha
+kubectl version
+```
