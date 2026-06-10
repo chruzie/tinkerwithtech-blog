@@ -65,14 +65,16 @@ export default function RootLayout({
           src="https://storage.ko-fi.com/cdn/scripts/overlay-widget.js"
           strategy="afterInteractive"
         />
-        <Script id="kofi-widget" strategy="afterInteractive">
+        <Script id="kofi-widget" strategy="lazyOnload">
           {`
-            kofiWidgetOverlay.draw('chruzie', {
-              'type': 'floating-chat',
-              'floating-chat.donateButton.text': 'Support me',
-              'floating-chat.donateButton.background-color': '#ff6501',
-              'floating-chat.donateButton.text-color': '#fff'
-            });
+            if (typeof kofiWidgetOverlay !== 'undefined') {
+              kofiWidgetOverlay.draw('Y8Y51KQK8E', {
+                'type': 'floating-chat',
+                'floating-chat.donateButton.text': 'Support me',
+                'floating-chat.donateButton.background-color': '#ff6501',
+                'floating-chat.donateButton.text-color': '#fff'
+              });
+            }
           `}
         </Script>
       </body>
